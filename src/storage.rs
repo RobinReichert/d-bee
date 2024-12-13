@@ -1,6 +1,5 @@
 use std::{fs, io, path::PathBuf};
-
-const BASE_PATH: &str = "~/.b-bee/";
+use dirs::home_dir;
 
 pub struct FileManager {
      base_path : PathBuf
@@ -8,7 +7,9 @@ pub struct FileManager {
 
 impl FileManager {
     pub fn new() -> FileManager {
-        FileManager { base_path : PathBuf::from(BASE_PATH) }
+        let mut path = home_dir().expect("Failed to find home directory");
+        path.push(".d-bee");
+        FileManager { base_path : path}
     }
 
     pub fn create_database(&self) -> io::Result<()> {

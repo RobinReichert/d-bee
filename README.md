@@ -1,6 +1,6 @@
 # d-bee
 
-## Planned modules
+## Strategy 
 made by AI may be changed on the go
 
 ### 1. Core Modules
