@@ -1,4 +1,4 @@
-use std::{fs, io, path::PathBuf};
+use std::{fs, io::{self, Error}, path::PathBuf};
 use dirs::home_dir;
 
 pub struct FileManager {
@@ -12,10 +12,18 @@ impl FileManager {
         FileManager { base_path : path}
     }
 
-    pub fn create_database(&self) -> io::Result<()> {
-        fs::create_dir_all(&self.base_path)?;  
-        Ok(())
+    pub fn create_database(&self, name :&str) -> io::Result<()> {
+        let mut path = self.base_path.clone(); 
+        path.push("databases");
+        path.push(name);
+        if path.exists() {
+            return Err(Error::other("database already exists"));
+        }
+        fs::create_dir_all(path)?;  
+        return Ok(());
     }
+
+
 }
 
 #[cfg(test)]
@@ -26,7 +34,14 @@ mod tests {
     #[test]
     fn create_database_panic_test() {
         let fm = FileManager::new();
-        fm.create_database().expect("Failed to create database dir");
+        fm.create_database("test").expect("Failed to create database dir");
+    }
+
+    #[test]
+    fn create_database_dublicate_test() {
+        let fm = FileManager::new();
+        fm.create_database("double").expect("Failed to create database dir");
+        fm.create_database("double").expect_err("database already exists");
     }
 
 }
