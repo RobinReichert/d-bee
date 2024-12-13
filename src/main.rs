@@ -2,6 +2,6 @@ mod storage;
 
 fn main() {
     let fm = storage::FileManager::new();
-    println!("{}", fm.hello_world()); 
+    let _ = fm.create_database();
 }
 
