@@ -135,36 +135,36 @@ For analytical databases, a dedicated module for running complex aggregations an
 
 Organize your codebase with modular folders or namespaces:
 
-src/
-├── storage/
-│   ├── file_manager.rs       # Low-level file operations
-│   ├── page_manager.rs       # Page-level operations
-│   ├── log_manager.rs        # Write-ahead logs
-├── query/
-│   ├── parser.rs             # SQL parser or query DSL
-│   ├── planner.rs            # Query planner
-│   ├── executor.rs           # Query executor
-├── index/
-│   ├── btree.rs              # B-tree implementation
-│   ├── hash_index.rs         # Hash-based index
-├── transaction/
-│   ├── transaction_manager.rs # Transaction lifecycle
-│   ├── lock_manager.rs       # Concurrency control
-├── networking/
-│   ├── server.rs             # Server to handle client requests
-│   ├── protocol.rs           # Custom or standard protocol implementation
-├── security/
-│   ├── auth.rs               # Authentication and authorization
-│   ├── encryption.rs         # Data encryption
-├── schema/
-│   ├── schema_manager.rs     # Schema definitions
-│   ├── constraints.rs        # Constraints and validations
-├── config/
-│   ├── config_manager.rs     # Load and manage settings
-├── logging/
-│   ├── logger.rs             # Logging utilities
-│   ├── metrics.rs            # Performance metrics
-├── utils/                    # Common utility functions
-│   ├── serialization.rs      # Serialize/deserialize helpers
-│   ├── error.rs              # Error handling utilities
-└── main.rs                   # Entry point
+src//
+├── storage//
+│   ├── file_manager.rs       # Low-level file operations/
+│   ├── page_manager.rs       # Page-level operations/
+│   ├── log_manager.rs        # Write-ahead logs/
+├── query//
+│   ├── parser.rs             # SQL parser or query DSL/
+│   ├── planner.rs            # Query planner/
+│   ├── executor.rs           # Query executor/
+├── index//
+│   ├── btree.rs              # B-tree implementation/
+│   ├── hash_index.rs         # Hash-based index/
+├── transaction//
+│   ├── transaction_manager.rs # Transaction lifecycle/
+│   ├── lock_manager.rs       # Concurrency control/
+├── networking//
+│   ├── server.rs             # Server to handle client requests/
+│   ├── protocol.rs           # Custom or standard protocol implementation/
+├── security//
+│   ├── auth.rs               # Authentication and authorization/
+│   ├── encryption.rs         # Data encryption/
+├── schema//
+│   ├── schema_manager.rs     # Schema definitions/
+│   ├── constraints.rs        # Constraints and validations/
+├── config//
+│   ├── config_manager.rs     # Load and manage settings/
+├── logging//
+│   ├── logger.rs             # Logging utilities/
+│   ├── metrics.rs            # Performance metrics/
+├── utils/                    # Common utility functions/
+│   ├── serialization.rs      # Serialize/deserialize helpers/
+│   ├── error.rs              # Error handling utilities/
+└── main.rs                   # Entry point/
