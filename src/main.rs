@@ -1,6 +1,7 @@
 mod storage;
 
 fn main() {
-    let _fm = storage::FileManager::new();
+    let fm = storage::FileManager::new();
+    println!("{}", fm.hello_world()); 
 }
 
