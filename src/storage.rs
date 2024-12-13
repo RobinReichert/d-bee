@@ -19,6 +19,6 @@ mod tests {
     #[test]
     fn hello_world_test() {
         let fm = FileManager::new();
-        assert_eq!(fm.hello_world(), "hello world");
+        assert_eq!(fm.hello_world(), "hello worl");
     }
 }
