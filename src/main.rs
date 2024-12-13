@@ -1,6 +1,6 @@
-mod parser;
-mod file_manager;
+mod storage;
 
 fn main() {
+    let _fm = storage::FileManager::new();
 }
 
