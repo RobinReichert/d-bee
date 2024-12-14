@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use std::{fs::{File, OpenOptions},  io::{self, Read, Seek, SeekFrom, Write}, path::PathBuf};
+use std::{fs::{create_dir_all, File, OpenOptions},  io::{self, Read, Seek, SeekFrom, Write}, path::PathBuf};
 use dirs::home_dir;
 
 pub struct FileManager {
@@ -10,7 +10,8 @@ pub struct FileManager {
 impl FileManager {
 
     pub fn new() -> FileManager {
-       let path = home_dir().unwrap().join(".d-bee");
+        let path = home_dir().unwrap().join(".d-bee");
+        create_dir_all(&path); 
         return FileManager {base_path: path};
     }
 
