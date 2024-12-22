@@ -19,7 +19,7 @@ pub trait FileManager {
     }
 
     fn delete_file(&self, path : &PathBuf) -> io::Result<()> {
-        remove_file(path)
+        std::fs::remove_file(path)
     }
 
     fn read_at(&self, path : &PathBuf, at : u64, length : usize) -> io::Result<Vec<u8>>;
