@@ -165,8 +165,8 @@ pub mod page_management {
         fn is_page(&self, id : usize) -> Result<Option<PageHeader>>;
         fn alloc_page(&self) -> Result<PageHeader>;
         fn dealloc_page(&self, page : PageHeader) -> Result<()>;
-        fn read_page(&self, page : PageHeader) -> Result<Vec<u8>>;
-        fn write_page(&self, page : PageHeader, data : Vec<u8>) -> Result<()>;
+        fn read_page(&self, page : &PageHeader) -> Result<Vec<u8>>;
+        fn write_page(&self, page : PageHeader, data : Vec<u8>, size : usize) -> Result<()>;
     }
 
     pub enum PageHeader {
@@ -178,30 +178,14 @@ pub mod page_management {
         fn get_id(&self) -> usize {
             match self {
                 PageHeader::Simple(h) => h.id,
-                PageHeader::None() => {panic!()},
+                PageHeader::None() => {panic!("passed None PageHeader, this can only be used as placeholder, not in a final implementation")},
             }
         }
     }
 
     pub mod simple {
 
-        use super::{
-            PAGE_SIZE, 
-            HEAD_SIZE,
-            file_management, 
-            FileHandler, 
-            SimpleFileHandler, 
-            PathBuf, 
-            fmt,
-            Display, 
-            Formatter, 
-            Bubble, 
-            PageHandler, 
-            PageHeader,
-            Result, 
-            ErrorKind, 
-            Error
-        };
+        use super::*;
 
         pub struct SimplePageHandler {
             file_handler : Box<dyn FileHandler>
@@ -247,9 +231,9 @@ pub mod page_management {
             }
         }
 
-        impl ToString for SimplePageHeader {
-            fn to_string(&self) -> String {
-                return format!("id: {}, used: {}, next {}", self.id, self.used, self.next.map_or("none".to_string(), |n| n.to_string()));
+        impl Display for SimplePageHeader {
+            fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+                return write!(f, "id: {}, used: {}, next {}", self.id, self.used, self.next.map_or("none".to_string(), |n| n.to_string()));
             }
         }
 
@@ -277,9 +261,9 @@ pub mod page_management {
                 let first_page : usize = usize::from_le_bytes(self.file_handler.read_at(0, 8)?.try_into().unwrap());
                 let second_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(first_page), 8)?;
                 if second_page_bytes != vec![0, 0, 0, 0, 0, 0, 0, 0] {
-                    self.file_handler.write_at(0, second_page_bytes);
+                    self.file_handler.write_at(0, second_page_bytes)?;
                 }else{
-                    self.file_handler.write_at(0, (first_page+1).to_le_bytes().to_vec());
+                    self.file_handler.write_at(0, (first_page + 1).to_le_bytes().to_vec())?;
                 }
                 return Ok(first_page);
             }
@@ -288,31 +272,30 @@ pub mod page_management {
                 return id * PAGE_SIZE + HEAD_SIZE;  
             }
 
+            ///Iterates over all headers once until true is returned from f
             fn iterate_headers<F>(&self, mut f : F) -> Result<()> where F : FnMut(SimplePageHeader) -> bool {
-                let mut i : usize = 0;
-                let mut prev = i;
+                let mut current_page_id : usize = 0;
+                let mut previous_page_id = current_page_id;
                 loop {
-                    let header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(i), PAGE_SIZE)?;
-                    let mut  n : usize = 1;
-                    let own_header = SimplePageHeader::from(header_page_bytes[0..SimplePageHeader::get_size()].to_vec());
-                    for n in (SimplePageHeader::get_size()..own_header.used).step_by(SimplePageHeader::get_size()) {
-                        let m :usize = n + SimplePageHeader::get_size();
-                        if let Some(header_bytes) = header_page_bytes.get(n..m) {
-                            let mut header = SimplePageHeader::from(header_bytes.to_vec());
-                            header.header_page_id = Some(i);
-                            header.header_offset = Some(n);
-                            header.previous_page_id = Some(prev);
-                            if f(header) {
+                    let current_header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(current_page_id), PAGE_SIZE)?;
+                    let mut  current_header_offset : usize = 1;
+                    let own_header = SimplePageHeader::from(current_header_page_bytes[0..SimplePageHeader::get_size()].to_vec());
+                    for current_header_offset in (SimplePageHeader::get_size()..own_header.used).step_by(SimplePageHeader::get_size()) {
+                        if let Some(header_bytes) = current_header_page_bytes.get(current_header_offset..current_header_offset + SimplePageHeader::get_size()) {
+                            let mut current_header = SimplePageHeader::from(header_bytes.to_vec());
+                            current_header.header_page_id = Some(current_page_id);
+                            current_header.header_offset = Some(current_header_offset);
+                            current_header.previous_page_id = Some(previous_page_id);
+                            if f(current_header) {
                                 return Ok(());
                             }
                         }else{
                             break;
                         }
                     }
-                    let header = SimplePageHeader::from(header_page_bytes[0..SimplePageHeader::get_size()].to_vec());
-                    if let Some(next) = header.next {
-                        prev = i;
-                        i = next;
+                    if let Some(next_page_id) = own_header.next {
+                        previous_page_id = current_page_id;
+                        current_page_id = next_page_id;
                     }else{
                         break;
                     }
@@ -395,9 +378,9 @@ pub mod page_management {
 
             fn find_fitting_page(&self, size : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
-                self.iterate_headers(|h| {
-                    if PAGE_SIZE - h.used >= size {
-                        header = Some(PageHeader::Simple(h));
+                self.iterate_headers(|current_header| {
+                    if PAGE_SIZE - current_header.used >= size {
+                        header = Some(PageHeader::Simple(current_header));
                         return true;
                     }
                     return false;
@@ -407,9 +390,9 @@ pub mod page_management {
 
             fn is_page(&self, id : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
-                self.iterate_headers(|h| {
-                    if h.id == id {
-                        header = Some(PageHeader::Simple(h));
+                self.iterate_headers(|current_header| {
+                    if current_header.id == id {
+                        header = Some(PageHeader::Simple(current_header));
                         return true;
                     }
                     return false;
@@ -418,96 +401,100 @@ pub mod page_management {
             }
 
             fn alloc_page(&self) -> Result<PageHeader> {
-                let mut i : usize = 0;
+                let mut current_header_page_id : usize = 0;
+                let mut new_page_id = self.pop_free()?;
                 loop {
-                    let new_page_id = self.pop_free()?;
-                    let mut page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(i), PAGE_SIZE)?;
-                    let mut own_header = SimplePageHeader::from(page_bytes[0..SimplePageHeader::get_size()].to_vec());
+                    let mut current_header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(current_header_page_id), PAGE_SIZE)?;
+                    let mut own_header = SimplePageHeader::from(current_header_page_bytes[0..SimplePageHeader::get_size()].to_vec());
                     if PAGE_SIZE - own_header.used > SimplePageHeader::get_size() {
                         //Add new header to the header page
                         let new_header = SimplePageHeader::new(new_page_id, None, 0, Some(own_header.id), Some(own_header.used), None);
                         let new_header_bytes : Vec<u8> = new_header.clone().into();
-                        page_bytes[own_header.used..own_header.used + SimplePageHeader::get_size()].copy_from_slice(&new_header_bytes);
+                        current_header_page_bytes[own_header.used..own_header.used + SimplePageHeader::get_size()].copy_from_slice(&new_header_bytes);
                         //Increase used value
                         own_header.used += SimplePageHeader::get_size();
-                        page_bytes[..SimplePageHeader::get_size()].copy_from_slice(&Into::<Vec<u8>>::into(own_header)); 
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(i), page_bytes)?;
+                        current_header_page_bytes[..SimplePageHeader::get_size()].copy_from_slice(&Into::<Vec<u8>>::into(own_header)); 
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(current_header_page_id), current_header_page_bytes)?;
                         return Ok(PageHeader::Simple(new_header));
                     }
-                    if let Some(next) = own_header.next {
+                    if let Some(next_header_page_id) = own_header.next {
                         //In case one header page did not have enough space for another header and
                         //another one exists already the loop gets repeated with the next header page
-                        i = next;     
+                        current_header_page_id = next_header_page_id;     
                     }else{
                         //In case one page is full and no next was created a new one is appended to the
                         //previous page.
                         own_header.next = Some(new_page_id);
-                        let header_bytes : Vec<u8> = own_header.clone().into();
-                        page_bytes[..SimplePageHeader::get_size()].copy_from_slice(&header_bytes); 
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(i), page_bytes);
+                        let own_header_bytes : Vec<u8> = own_header.clone().into();
+                        current_header_page_bytes[..SimplePageHeader::get_size()].copy_from_slice(&own_header_bytes); 
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(current_header_page_id), current_header_page_bytes);
                         let new_own_header = SimplePageHeader::new(new_page_id, None, SimplePageHeader::get_size(), None, None, Some(own_header.id));
                         self.file_handler.write_at(SimplePageHandler::calculate_page_start(new_page_id), new_own_header.into());
-                        i = new_page_id;
+                        current_header_page_id = new_page_id;
+                        new_page_id = self.pop_free()?;
                     }
                 }
                 return Err(Error::new(ErrorKind::Other, "unexpected error"));
             }
 
             fn dealloc_page(&self, p : PageHeader) -> Result<()> {
-                if let PageHeader::Simple(page) = p {
-                    if let Some(next) = page.next {
-                        self.dealloc_page(self.is_page(page.next.ok_or(ErrorKind::InvalidInput)?)?.ok_or(ErrorKind::InvalidInput)?);
+                if let PageHeader::Simple(page_header) = p {
+                    if let Some(next_page_header_id) = page_header.next {
+                        self.dealloc_page(self.is_page(next_page_header_id)?.ok_or(ErrorKind::InvalidInput)?);
                     }
-                    let mut header_page_bytes : Vec<u8> = self.file_handler.read_at(SimplePageHandler::calculate_page_start(page.header_page_id.ok_or(ErrorKind::InvalidInput)?), PAGE_SIZE)?;
-                    //Remove header from header page
-                    let offset : usize = page.header_offset.ok_or(ErrorKind::InvalidInput)?;
-                    header_page_bytes.drain(offset..(offset+SimplePageHeader::get_size())); 
+                    let header_page_id = page_header.header_page_id.ok_or_else(||{Error::new(ErrorKind::InvalidInput, "header did not contain header_page_id")})?;
+                    let mut header_page_bytes : Vec<u8> = self.file_handler.read_at(SimplePageHandler::calculate_page_start(header_page_id), PAGE_SIZE)?;
+                    //Remove header from header page_header
+                    let header_offset : usize = page_header.header_offset.ok_or(ErrorKind::InvalidInput)?;
+                    header_page_bytes.drain(header_offset..(header_offset + SimplePageHeader::get_size())); 
                     //Decrease used value
                     let mut own_header = SimplePageHeader::from(header_page_bytes[..SimplePageHeader::get_size()].to_vec());
                     own_header.used -= SimplePageHeader::get_size();
-                    //If a header page is empty it gets removed
-                    if own_header.used <= SimplePageHeader::get_size() && page.header_page_id.unwrap() != 0 {
-                        let mut prev_header = SimplePageHeader::from(self.file_handler.read_at(SimplePageHandler::calculate_page_start(page.previous_page_id.ok_or(ErrorKind::InvalidInput)?), PAGE_SIZE)?[..SimplePageHeader::get_size()].to_vec());
-                        prev_header.next = own_header.next;
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page.previous_page_id.unwrap()), prev_header.into());
+                    //If a header page_header is empty it gets removed
+                    if own_header.used <= SimplePageHeader::get_size() && page_header.header_page_id.unwrap() != 0 {
+                        let previous_page_id = page_header.previous_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain previous_page_id")})?;
+                        let previous_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(previous_page_id), PAGE_SIZE)?;
+                        let mut previous_page_header = SimplePageHeader::from(previous_page_bytes[..SimplePageHeader::get_size()].to_vec());
+                        previous_page_header.next = own_header.next;
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(previous_page_id), previous_page_header.into());
                     }else{
                         header_page_bytes[..SimplePageHeader::get_size()].copy_from_slice(&Into::<Vec<u8>>::into(own_header)); 
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page.header_page_id.unwrap()), header_page_bytes)?;
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page_header.header_page_id.unwrap()), header_page_bytes)?;
                     }
-                    //Add page to free list
-                    self.push_free(page.id);
+                    //Add page_header to free list
+                    self.push_free(page_header.id);
                     return Ok(());
                 }
-                return Err(Error::new(ErrorKind::InvalidInput, "wrong header"));
+                return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
-            fn read_page(&self, p : PageHeader) -> Result<Vec<u8>> {
-                if let PageHeader::Simple(page) = p {
-                    return self.file_handler.read_at(SimplePageHandler::calculate_page_start(page.id), page.used);
+            fn read_page(&self, p : &PageHeader) -> Result<Vec<u8>> {
+                if let PageHeader::Simple(page_header) = p {
+                    return self.file_handler.read_at(SimplePageHandler::calculate_page_start(page_header.id), PAGE_SIZE);
                 }
-
-                return Err(Error::new(ErrorKind::InvalidInput, "wrong header"));
+                return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
-            fn write_page(&self, p : PageHeader, data : Vec<u8>) -> Result<()> {
+            fn write_page(&self, p : PageHeader, data : Vec<u8>, size : usize) -> Result<()> {
                 if data.len() > PAGE_SIZE {
                     return Err(Error::new(ErrorKind::ArgumentListTooLong, "data is to big to write into one page"));
                 }
-                if let PageHeader::Simple(page) = p {
-                    let mut header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(page.header_page_id.ok_or(ErrorKind::InvalidInput)?), PAGE_SIZE)?;
-                    let offset : usize = page.header_offset.ok_or(ErrorKind::InvalidInput)?;
-                    let header_bytes = header_page_bytes.get(offset..(offset+SimplePageHeader::get_size())).ok_or(ErrorKind::InvalidInput)?;
-                    let mut header = SimplePageHeader::from(header_bytes.to_vec());
-                    if header.id == page.id {
-                        header.used = data.len();
-                        header_page_bytes[offset..(offset+SimplePageHeader::get_size())].copy_from_slice(&Into::<Vec<u8>>::into(header));
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page.id), data)?;
-                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page.header_page_id.unwrap()), header_page_bytes)?;
+                if let PageHeader::Simple(page_header) = p {
+                    let header_page_id = page_header.header_page_id.ok_or(ErrorKind::InvalidInput)?;
+                    let mut header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(header_page_id), PAGE_SIZE)?;
+                    let header_offset : usize = page_header.header_offset.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not have a header_offset")})?;
+                    let header_bytes = header_page_bytes.get(header_offset..(header_offset + SimplePageHeader::get_size())).ok_or_else(|| {Error::new(ErrorKind::Other, "unexpected error")})?;
+                    let mut own_header = SimplePageHeader::from(header_bytes.to_vec());
+                    if own_header.id == page_header.id {
+                        own_header.used = size;
+                        header_page_bytes[header_offset..(header_offset + SimplePageHeader::get_size())].copy_from_slice(&Into::<Vec<u8>>::into(own_header));
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page_header.id), data)?;
+                        self.file_handler.write_at(SimplePageHandler::calculate_page_start(page_header.header_page_id.unwrap()), header_page_bytes)?;
                         return Ok(());
                     }
                     return Err(Error::new(ErrorKind::InvalidInput, "header_id was wrong"));
                 }
-                return Err(Error::new(ErrorKind::InvalidInput, "wrong header"));
+                return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
         }
 
@@ -522,8 +509,9 @@ pub mod page_management {
                 file_management::delete_file(&path);
                 let handler: Box<dyn PageHandler> = Box::new(SimplePageHandler::new(path).unwrap());
                 let data = b"Hello, Page!".to_vec();
-                handler.write_page(handler.alloc_page().unwrap(), data.clone()).unwrap();
-                let read_data = handler.read_page(handler.is_page(1).unwrap().unwrap()).unwrap();
+                handler.write_page(handler.alloc_page().unwrap(), data.clone(), data.len()).unwrap();
+                let mut read_data = handler.read_page(&handler.is_page(1).unwrap().unwrap()).unwrap();
+                read_data.truncate(data.len());
                 assert_eq!(data, read_data);
             }
 
@@ -534,7 +522,7 @@ pub mod page_management {
                 let handler: Box<dyn PageHandler> = Box::new(SimplePageHandler::new(path).unwrap());
                 let page1 = handler.alloc_page().unwrap();
                 let page2 = handler.alloc_page().unwrap();
-                handler.write_page(page1, vec![0; PAGE_SIZE - 10]).unwrap();
+                handler.write_page(page1, vec![0; PAGE_SIZE - 10], PAGE_SIZE - 10).unwrap();
                 let fitting_page = handler.find_fitting_page(20).unwrap();
                 assert_eq!(page2.get_id(), fitting_page.unwrap().get_id());
             }
@@ -545,7 +533,7 @@ pub mod page_management {
                 file_management::delete_file(&path);
                 let handler: Box<dyn PageHandler> = Box::new(SimplePageHandler::new(path).unwrap());
                 let page1 = handler.alloc_page().unwrap();
-                handler.write_page(page1, vec![0; PAGE_SIZE - 10]).unwrap();
+                handler.write_page(page1, vec![0; PAGE_SIZE - 10], PAGE_SIZE - 10).unwrap();
                 let fitting_page = handler.find_fitting_page(90).unwrap();
                 assert!(matches!(fitting_page, None), "expected none but found some");
             }
@@ -598,71 +586,109 @@ pub mod table_management {
     use std::{io::{self, Result}, path::PathBuf};
 
     pub trait TableHandler {
-        fn insert_row(&self, row : Vec<String>) -> io::Result<()>;
-        fn delete_row(&self) -> io::Result<()>;
+        fn insert_row(&self, row : Row) -> Result<()>;
+        fn select_row(&self, predicate : Predicate) -> Result<Cursor>;
+        fn delete_row(&self, predicate : Predicate) -> Result<()>;
     }
 
-    pub struct SimpleTableHandler {
-        page_handler: Box<dyn PageHandler>
+    pub enum Value {
+        Text(String),
+        Number(u64),
     }
 
     pub struct Row {
-        cols : Vec<String>,
+        cols : Vec<Value>,
     }
 
-    impl Row {
-        fn from(cols : Vec<String>) -> Row {
-            return Row { cols };
-        }
-
-        fn size(&self) -> usize {
-            todo!();
-        }
+    pub enum Operator {
+        Equals,
+        Less,
+        LessOrEqual,
+        Bigger,
+        BiggerOrEqual,
     }
 
-    impl From<Vec<u8>> for Row {
-        fn from(value: Vec<u8>) -> Self {
-            todo!(); 
-        }
+    pub struct Predicate {
+        column : String,
+        operator : Operator,
+        value : Value,
     }
 
-    impl Into<Vec<u8>> for Row {
+    pub struct Cursor {
+    }
+
+    impl Into<Vec<u8>> for Value {
         fn into(self) -> Vec<u8> {
-            todo!(); 
+            match self { 
+                Self::Text(val) => {val.as_bytes().to_vec()},
+                Self::Number(val) => {val.to_le_bytes().to_vec()},
+            }
         }
     }
 
+    pub mod simple {
 
-    impl SimpleTableHandler {
+        use super::*;
 
-        fn new(table_path : PathBuf) -> Result<SimpleTableHandler> {
-            let page_handler = Box::new(SimplePageHandler::new(table_path)?);
-            return Ok(SimpleTableHandler {page_handler});
+        pub struct SimpleTableHandler {
+            page_handler: Box<dyn PageHandler>
         }
 
-    }
+        impl From<Vec<u8>> for Row {
+            fn from(value: Vec<u8>) -> Self {
+                todo!(); 
+            }
+        }
 
-    impl TableHandler for SimpleTableHandler {
+        impl Into<Vec<u8>> for Row {
+            fn into(self) -> Vec<u8> {
+                let mut buffer = Vec::new();
+                let offset_size = (usize ::BITS / 8) as usize;
+                buffer.resize(self.cols.len() * offset_size, 0); 
+                let mut offset_cumulative : usize = 0;
+                for (index, col) in self.cols.into_iter().enumerate() {
+                    let mut col_bytes : Vec<u8> = col.into();
+                    offset_cumulative += col_bytes.len();
+                    buffer[index * offset_size..index + 1 * offset_size].copy_from_slice(&offset_cumulative.to_le_bytes().to_vec());
+                    buffer.append(&mut col_bytes);
+                }
+                return buffer;
+            }
+        }
 
-        fn insert_row(&self, row : Vec<String>) -> io::Result<()> {
-            let row = Row::from(row); 
-            if let Some(id) = self.page_handler.find_fitting_page(row.size() + (usize::BITS / 8) as usize)? {
 
+        impl SimpleTableHandler {
+            fn new(table_path : PathBuf) -> Result<SimpleTableHandler> {
+                let page_handler = Box::new(SimplePageHandler::new(table_path)?);
+                return Ok(SimpleTableHandler {page_handler});
+            }
+        }
+
+        impl TableHandler for SimpleTableHandler {
+            fn insert_row(&self, row : Row) -> Result<()> {
+                let mut row_bytes : Vec<u8> = row.into();
+                let page_header = match self.page_handler.find_fitting_page(row_bytes.len() + (usize::BITS / 8) as usize)? {
+                    Some(p) => p,
+                    None => self.page_handler.alloc_page()?,
+                };
+                let mut page = self.page_handler.read_page(&page_header)?; 
+                page.append(&mut row_bytes); 
+                self.page_handler.write_page(page_header, page, 10);
+                return Ok(());
             }
 
-            todo!(); 
+            fn delete_row(&self, predicate : Predicate) -> Result<()> {
+                todo!();    
+            }
+
+            fn select_row(&self, predicate : Predicate) -> Result<Cursor> {
+               todo!(); 
+            }
         }
 
-        fn delete_row(&self) -> io::Result<()> {
-            todo!();    
+        #[cfg(test)]
+        mod test {
+
         }
-
     }
-
-#[cfg(test)]
-    mod test {
-
-    }
-
 }
-
