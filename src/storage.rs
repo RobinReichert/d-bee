@@ -159,7 +159,7 @@ pub mod page_management {
     };
     use crate::bubble::Bubble;
 
-    const PAGE_SIZE : usize = 4096;
+    const PAGE_SIZE : usize = 128;
     const HEAD_SIZE : usize = 8;
 
     pub trait PageHandler : Display {
@@ -169,7 +169,8 @@ pub mod page_management {
         fn dealloc_page(&self, page : PageHeader) -> Result<()>;
         fn read_page(&self, page : &PageHeader) -> Result<Vec<u8>>;
         fn write_page(&self, page : PageHeader, data : Vec<u8>, size : usize) -> Result<()>;
-        fn iterate_pages(&self, f : Box<dyn Fn(Vec<u8>) -> bool>) -> Result<()>; 
+        fn iterate_pages<'a>(&self, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()>; 
+        fn iterate_pages_from<'a>(&self, start : PageHeader, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()>; 
     }
 
     #[derive(Clone)]
@@ -262,14 +263,14 @@ pub mod page_management {
             }
 
             ///Iterates over all headers once until true is returned from f
-            fn iterate_headers<F>(&self, mut f : F) -> Result<()> where F : FnMut(PageHeader) -> Result<bool> {
-                let mut current_page_id : usize = 0;
-                let mut previous_page_id = current_page_id;
+            fn iterate_headers_from<F>(&self, header : PageHeader, mut f : F) -> Result<()> where F : FnMut(PageHeader) -> Result<bool> {
+                let mut current_page_id : usize = header.header_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain header_page_id")})?;
+                let mut previous_page_id = header.previous_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain previous")})?;
+                let mut  initial_header_offset : usize = header.header_offset.ok_or_else(||{Error::new(ErrorKind::InvalidInput, "header did not contain offset")})?;
                 loop {
                     let current_header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(current_page_id), PAGE_SIZE)?;
-                    let mut  current_header_offset : usize = 1;
                     let own_header = PageHeader::from(current_header_page_bytes[0..PageHeader::get_size()].to_vec());
-                    for current_header_offset in (PageHeader::get_size()..own_header.used).step_by(PageHeader::get_size()) {
+                    for current_header_offset in (initial_header_offset..own_header.used).step_by(PageHeader::get_size()) {
                         if let Some(header_bytes) = current_header_page_bytes.get(current_header_offset..current_header_offset + PageHeader::get_size()) {
                             let mut current_header = PageHeader::from(header_bytes.to_vec());
                             current_header.header_page_id = Some(current_page_id);
@@ -288,6 +289,7 @@ pub mod page_management {
                     }else{
                         break;
                     }
+                    initial_header_offset = PageHeader::get_size();
                 }
                 return Ok(());
             }
@@ -339,7 +341,7 @@ pub mod page_management {
                         }
                         //Write used space
                         let mut allocated = false;
-                        self.iterate_headers(|h| {
+                        self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },|h| {
                             if i == h.id {
                                 let space = h.used * width / PAGE_SIZE;
                                 let mut space_representation = String::new();
@@ -367,25 +369,27 @@ pub mod page_management {
 
             fn find_fitting_page(&self, size : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
-                self.iterate_headers(|current_header| {
+                let callback = |current_header:PageHeader| {
                     if PAGE_SIZE - current_header.used >= size {
                         header = Some(current_header);
                         return Ok(true);
                     }
                     return Ok(false);
-                })?;
+                };
+                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },callback)?;
                 return Ok(header);
             }
 
             fn is_page(&self, id : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
-                self.iterate_headers(|current_header| {
+                let callback = |current_header : PageHeader| {
                     if current_header.id == id {
                         header = Some(current_header);
                         return Ok(true);
                     }
                     return Ok(false);
-                })?;
+                };
+                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  }, callback)?;
                 return Ok(header);
             }
 
@@ -478,10 +482,17 @@ pub mod page_management {
                 return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
-            fn iterate_pages(&self, mut f : Box<dyn Fn(Vec<u8>) -> bool>) -> Result<()> {
-                self.iterate_headers(|h| {
-                    return Ok(f(self.read_page(&h)?));
-                })?;
+            fn iterate_pages<'a>(&self, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()> {
+                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },|h| {
+                    return Ok(f(h.clone(), self.read_page(&h)?));
+                }, )?;
+                return Ok(());
+            }
+
+            fn iterate_pages_from<'a>(&self, start : PageHeader, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()> {
+                self.iterate_headers_from(start,|h| {
+                    return Ok(f(h.clone(), self.read_page(&h)?));
+                }, )?;
                 return Ok(());
             }
         }
@@ -570,18 +581,20 @@ pub mod page_management {
 
 pub mod table_management {
 
-    use super::{file_management, page_management::{PageHandler, simple::{SimplePageHandler}}};
+    use super::{file_management, page_management::{PageHandler, PageHeader, simple::{SimplePageHandler}}};
     use std::{
-        io::{self, Result},
+        io::{self, Error, ErrorKind, Result},
         path::PathBuf,
+        cell::RefCell,
         fmt::{self, Display, Formatter}
     };
-    pub trait TableHandler {
+    pub trait TableHandler : Display {
         fn insert_row(&self, row : Row) -> Result<()>;
-        fn select_row(&self, predicate : Predicate) -> Result<Cursor>;
+        fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>>;
         fn delete_row(&self, predicate : Predicate) -> Result<()>;
+        fn next(&self, cursor : &mut Cursor) -> Result<bool>;
     }
-    
+
     #[derive(Clone)]
     pub enum Value {
         Text(String),
@@ -597,6 +610,7 @@ pub mod table_management {
         cols : Vec<Value>,
     }
 
+    #[derive(Clone)]
     pub enum Operator {
         Equals,
         Less,
@@ -605,6 +619,7 @@ pub mod table_management {
         BiggerOrEqual,
     }
 
+    #[derive(Clone)]
     pub struct Predicate {
         column : String,
         operator : Operator,
@@ -612,8 +627,18 @@ pub mod table_management {
     }
 
     pub struct Cursor {
+        pub value : Row,
+        header : PageHeader,
+        ptr_index : usize,
+        data_offset : usize,
+        predicate : Predicate,
     }
 
+    impl Row {
+        fn fulfills(&self, predicate : &Predicate) -> bool {
+            return true;
+        }
+    }
     impl Display for Row {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut result  = String::new(); 
@@ -652,6 +677,8 @@ pub mod table_management {
     }
 
     pub mod simple {
+
+        use fmt::Pointer;
 
         use super::*;
 
@@ -701,25 +728,45 @@ pub mod table_management {
             }
         }
 
+        impl Display for SimpleTableHandler {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                let mut cursor = self.select_row(Predicate{ column: "".to_string(), operator: Operator::Less, value: Value::Text("hallo".to_string())}).unwrap().unwrap();
+                let mut result = String::new();
+                loop {
+                    result.push_str(&format!("{} \n", &cursor.value));
+                    if !self.next(&mut cursor).unwrap() {
+                        break;
+                    }
+                }
+                return write!(f,"{}", result);
+            }
+        }
+
         impl TableHandler for SimpleTableHandler {
             fn insert_row(&self, row : Row) -> Result<()> {
                 let mut row_bytes : Vec<u8> = row.into();
                 let row_size = row_bytes.len();
                 let ptr_size = (usize::BITS / 8) as usize;
+                let mut used = 0;
                 let page_header = match self.page_handler.find_fitting_page(row_size + ptr_size)? {
                     Some(p) => p,
-                    None => self.page_handler.alloc_page()?,
+                    None => {
+                        used += ptr_size;
+                        self.page_handler.alloc_page()?},
                 };
-                let used = page_header.used + row_size + ptr_size;
+                used += page_header.used + row_size + ptr_size;
                 let mut page = self.page_handler.read_page(&page_header)?; 
                 let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
                 let data_offset = usize::from_le_bytes(page[(ptr_count * ptr_size)..((ptr_count + 1) * ptr_size)].try_into().unwrap()); 
                 page[0..ptr_size].copy_from_slice(&(ptr_count+1).to_le_bytes().to_vec());
                 page[((ptr_count + 1) * ptr_size)..((ptr_count + 2) * ptr_size)].copy_from_slice(&(data_offset + row_size).to_le_bytes().to_vec());
+                if page.len() < data_offset + row_size {
+                    return Err(Error::new(ErrorKind::InvalidInput, "page to small for input"));
+                }
                 let start : usize = page.len() - (data_offset + row_size);
                 let end : usize = page.len() - data_offset;
                 page[start..end].copy_from_slice(&row_bytes);
-                self.page_handler.write_page(page_header, page, used);
+                self.page_handler.write_page(page_header.clone(), page, used)?;
                 return Ok(());
             }
 
@@ -727,24 +774,60 @@ pub mod table_management {
                 todo!();    
             }
 
-            fn select_row(&self, predicate : Predicate) -> Result<Cursor> {
+            fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
                 let col_types = self.col_types.clone();
-                self.page_handler.iterate_pages(Box::new(move |page|{
+                let mut cursor : Option<Cursor> = None;
+                self.page_handler.iterate_pages(Box::new(|header, page|{
                     let ptr_size = (usize::BITS / 8) as usize;
                     let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
                     let mut last_data_offset : usize = 0;
-                    for ptr_index in 0..ptr_count {
+                    for ptr_index in 0..ptr_count.clone() {
                         let data_offset = usize::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()); 
                         let start : usize = page.len() - data_offset;
                         let end : usize = page.len() - last_data_offset;
                         let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
-                        let row : Row = row_from_bytes(row_bytes, col_types.clone());
-                        println!("row: {}", row);
+                        let value : Row = row_from_bytes(row_bytes, col_types.clone());
+                        if value.fulfills(&predicate) {
+                            cursor = Some(Cursor {value, header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()});
+                            return true;
+                        }
                         last_data_offset = data_offset;
                     }
                     return false;
                 }));
-                return Ok(Cursor{});
+                return Ok(cursor);
+            }
+
+            fn next(&self, cursor : &mut Cursor) -> Result<bool> {
+                let col_types = self.col_types.clone();
+                let mut found_next = false;
+                let mut initial_ptr_index = cursor.ptr_index;
+                let mut initial_last_data_offset = cursor.data_offset;
+                self.page_handler.iterate_pages_from(cursor.header.clone(), Box::new(|header, page|{
+                    let ptr_size = (usize::BITS / 8) as usize;
+                    let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
+                    let mut last_data_offset : usize = initial_last_data_offset;
+                    for ptr_index in initial_ptr_index..ptr_count {
+                        let data_offset = usize::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()); 
+                        let start : usize = page.len() - data_offset;
+                        let end : usize = page.len() - last_data_offset;
+                        let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
+                        let value : Row = row_from_bytes(row_bytes, col_types.clone());
+                        if value.fulfills(&cursor.predicate) {
+                            found_next = true;
+                            cursor.value = value;
+                            cursor.header = header;
+                            cursor.data_offset = data_offset;
+                            cursor.ptr_index = ptr_index+1;
+                            return true;
+                        }
+                        last_data_offset = data_offset;
+                    }
+                    initial_ptr_index = 0;
+                    initial_last_data_offset = 0;
+                    return false;
+                }));
+                return Ok(found_next);
             }
         }
 
@@ -764,9 +847,22 @@ pub mod table_management {
                 file_management::delete_file(&path);
                 let handler = Box::new(SimpleTableHandler::new(path.clone(), vec![Value::Text("".to_string()), Value::Number(0)], vec!["test".to_string()]).unwrap());
                 handler.insert_row(Row { cols: vec![Value::Text("hallo".to_string()), Value::Number(19)]});
+                handler.insert_row(Row { cols: vec![Value::Text("weltens oderaa?".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("wasser".to_string()), Value::Number(2012873284237)]});
                 handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("felix stinkt die bahn ist scheiße kein plan was ich sonst noch schreiben soll. aber ich brauche genügend character um eine seite zu ueberfuellen.".to_string()), Value::Number(1)]});
-                handler.select_row(Predicate{ column: "".to_string(), operator: Operator::Less, value: Value::Text("hallo".to_string())});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
+                //               handler.insert_row(Row { cols: vec![Value::Text("felix stinkt die bahn ist scheiße kein plan was ich sonst noch schreiben soll. aber ich brauche genügend character um eine seite zu ueberfuellen.".to_string()), Value::Number(1)]}).expect_err("expected error");
+                println!("\n{}", handler);
             }
         }
     }
