@@ -27,10 +27,10 @@ impl Bubble {
 
     }
 
-    pub fn add_line(&mut self, content : Vec<&str>) {
+    pub fn add_line(&mut self, content : Vec<String>) {
         for i in 0..self.width.len() {
             self.content.push_str("|"); 
-            let mut line = String::from(content[i]);
+            let mut line = String::from(content[i].clone());
             line.truncate(self.width[i]);
             self.content.push_str(&line);
             for _ in content[i].len()..self.width[i] {

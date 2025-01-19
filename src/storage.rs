@@ -40,6 +40,7 @@ pub mod file_management {
     }
 
     impl SimpleFileHandler {
+
         pub fn new(path : PathBuf) -> Result<SimpleFileHandler> {
             if !path.is_file() {
                 return Err(Error::new(ErrorKind::NotFound, "the path passed is not a file or does not have right permissions"));
@@ -173,7 +174,7 @@ pub mod page_management {
         fn iterate_pages_from<'a>(&self, start : PageHeader, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()>; 
     }
 
-    #[derive(Clone)]
+#[derive(Clone)]
     pub struct  PageHeader {
         pub id : usize,
         pub used : usize,
@@ -301,7 +302,7 @@ pub mod page_management {
                 let width = 50;
                 let mut bubble = Bubble::new(vec![4, width]);
                 let first_page : usize = usize::from_le_bytes(self.file_handler.read_at(0, 8).unwrap().try_into().unwrap());
-                bubble.add_line(vec!["head", &format!("next free page at: {}", first_page.to_string())]);
+                bubble.add_line(vec!["head".to_string(), format!("next free page at: {}", first_page.to_string())]);
                 'outer:
                     for i in 0..10 {
                         let mut j : usize = 0;
@@ -315,7 +316,7 @@ pub mod page_management {
                                     let m :usize = n + PageHeader::get_size();
                                     if let Some(header_bytes) = header_page_bytes.get(n..m) {
                                         let mut header = PageHeader::from(header_bytes.to_vec());
-                                        bubble.add_line(vec![&i.to_string(), &header.to_string()]);
+                                        bubble.add_line(vec![i.to_string(), header.to_string()]);
                                     }
                                 }
                                 continue 'outer;
@@ -334,7 +335,7 @@ pub mod page_management {
                                 break;
                             }
                             if j == i {
-                                bubble.add_line(vec![&i.to_string(), &next.to_string()]);
+                                bubble.add_line(vec![i.to_string(), next.to_string()]);
                                 continue 'outer;
                             }
                             j = next;
@@ -351,14 +352,14 @@ pub mod page_management {
                                 for _ in space..width {
                                     space_representation.push_str(".");
                                 }
-                                bubble.add_line(vec![&i.to_string(), &space_representation]);
+                                bubble.add_line(vec![i.to_string(), space_representation]);
                                 allocated = true;
                                 return Ok(true);
                             }
                             return Ok(false);
                         });
                         if !allocated {
-                            bubble.add_line(vec![&i.to_string(), ""]);
+                            bubble.add_line(vec![i.to_string(), "".to_string()]);
                         }
                     }
                 write!(f, "{}", bubble)
@@ -459,7 +460,7 @@ pub mod page_management {
             }
 
             fn read_page(&self, page_header : &PageHeader) -> Result<Vec<u8>> {
-                    return self.file_handler.read_at(SimplePageHandler::calculate_page_start(page_header.id), PAGE_SIZE);
+                return self.file_handler.read_at(SimplePageHandler::calculate_page_start(page_header.id), PAGE_SIZE);
                 return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
@@ -588,6 +589,9 @@ pub mod table_management {
         cell::RefCell,
         fmt::{self, Display, Formatter}
     };
+
+    use crate::bubble::Bubble;
+
     pub trait TableHandler : Display {
         fn insert_row(&self, row : Row) -> Result<()>;
         fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>>;
@@ -595,13 +599,14 @@ pub mod table_management {
         fn next(&self, cursor : &mut Cursor) -> Result<bool>;
     }
 
-    #[derive(Clone)]
-    pub enum Value {
-        Text(String),
-        Number(usize),
+#[derive(Clone)]
+    pub enum Type {
+        Text,
+        Number,
     }
 
-    pub enum ByteValue {
+#[derive(Clone)]
+    pub enum Value {
         Text(Vec<u8>),
         Number(Vec<u8>),
     }
@@ -610,7 +615,7 @@ pub mod table_management {
         cols : Vec<Value>,
     }
 
-    #[derive(Clone)]
+#[derive(Clone)]
     pub enum Operator {
         Equals,
         Less,
@@ -619,7 +624,7 @@ pub mod table_management {
         BiggerOrEqual,
     }
 
-    #[derive(Clone)]
+#[derive(Clone)]
     pub struct Predicate {
         column : String,
         operator : Operator,
@@ -639,6 +644,7 @@ pub mod table_management {
             return true;
         }
     }
+
     impl Display for Row {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut result  = String::new(); 
@@ -649,80 +655,91 @@ pub mod table_management {
         }
     }
 
-    impl Into<Vec<u8>> for Value {
-        fn into(self) -> Vec<u8> {
-            match self { 
-                Self::Text(val) => {val.into_bytes().to_vec()},
-                Self::Number(val) => {val.to_le_bytes().to_vec()},
-            }
+    impl Value {
+        fn new_text(value : String) -> Self {
+            return Self::Text(value.as_bytes().to_vec());
+        }
+
+        fn new_number(value : usize) -> Self {
+            return Self::Number(value.to_le_bytes().to_vec());
+
         }
     }
 
-    impl From<ByteValue> for Value {
-        fn from(value: ByteValue) -> Self {
-            match value {
-                ByteValue::Text(bytes) => {Value::Text(String::from_utf8(bytes).unwrap())},
-                ByteValue::Number(bytes) => {Value::Number(usize::from_le_bytes(bytes.try_into().unwrap()))},
+    impl Into<Vec<u8>> for Value {
+        fn into(self) -> Vec<u8> {
+            match self { 
+                Self::Text(val) => {val},
+                Self::Number(val) => {val},
             }
-       }
+        }
     }
 
     impl Display for Value {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             match self { 
-                Self::Text(val) => write!(f, "{}", val),
-                Self::Number(val) => write!(f, "{}", val),
+                Self::Text(val) => write!(f, "{}", String::from_utf8(val.to_vec()).unwrap()),
+                Self::Number(val) => {
+                    if val.len() == std::mem::size_of::<usize>() {
+                        let array: [u8; std::mem::size_of::<usize>()] = match val[..].try_into() {
+                        Ok(array) => array,
+                        Err(_) => return write!(f, "[Invalid Number]"),
+                    };
+                    return write!(f, "{}", usize::from_le_bytes(array));
+                    }
+                return write!(f, "invalid number");
+                },
             }
         }
     }
 
     pub mod simple {
 
-        use fmt::Pointer;
+        type OffsetType = u16; //Bytes should always be >= ld(PAGE_SIZE)
 
         use super::*;
 
         pub struct SimpleTableHandler {
             page_handler : Box<dyn PageHandler>,
-            col_types : Vec<Value>,
+            col_types : Vec<Type>,
             col_names : Vec<String>,
         }
 
         impl Into<Vec<u8>> for Row {
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
-                let offset_size = (usize ::BITS / 8) as usize;
+                let offset_size = (OffsetType::BITS / 8) as usize;
                 buffer.resize(self.cols.len() * offset_size, 0); 
                 let mut offset_cumulative : usize = self.cols.len() * offset_size;
                 for (index, col) in self.cols.into_iter().enumerate() {
                     let mut col_bytes : Vec<u8> = col.into();
                     offset_cumulative += col_bytes.len();
-                    buffer[index * offset_size..(index + 1) * offset_size].copy_from_slice(&offset_cumulative.to_le_bytes().to_vec());
+                    buffer[index * offset_size..(index + 1) * offset_size].copy_from_slice(&OffsetType::to_le_bytes(offset_cumulative as OffsetType).to_vec());
                     buffer.append(&mut col_bytes);
                 }
                 return buffer;
             }
         }
 
-        fn row_from_bytes(bytes : Vec<u8>, col_types : Vec<Value>) -> Row {
-            let offset_size = (usize ::BITS / 8) as usize;
+        fn row_from_bytes(bytes : Vec<u8>, col_types : Vec<Type>) -> Row {
+            let offset_size = (OffsetType::BITS / 8) as usize;
             let mut last_col_offset = col_types.len() * offset_size;
             let mut row = Row {cols : Vec::new()};
             for (index, col) in col_types.iter().enumerate() {
-                let col_offset = usize::from_le_bytes(bytes[(index * offset_size)..((index + 1) * offset_size)].try_into().unwrap());
+                let col_offset = OffsetType::from_le_bytes(bytes[(index * offset_size)..((index + 1) * offset_size)].try_into().unwrap()) as usize;
                 let col_bytes : Vec<u8> = bytes[last_col_offset..col_offset].try_into().unwrap();
-                let val = Value::from(match col {
-                    Value::Text(_) => ByteValue::Text(col_bytes),
-                    Value::Number(_) => ByteValue::Number(col_bytes),
-                });
+                let val : Value = match col {
+                    Type::Number => Value::Number(col_bytes),
+                    Type::Text => Value::Text(col_bytes),
+                };
                 row.cols.push(val);
-                last_col_offset = col_offset;
+                last_col_offset = col_offset as usize;
             }
             return row;
         }
 
         impl SimpleTableHandler {
-            fn new(table_path : PathBuf, col_types : Vec<Value>, col_names : Vec<String>) -> Result<SimpleTableHandler> {
+            fn new(table_path : PathBuf, col_types : Vec<Type>, col_names : Vec<String>) -> Result<SimpleTableHandler> {
                 let page_handler = Box::new(SimplePageHandler::new(table_path)?);
                 return Ok(SimpleTableHandler {page_handler, col_types, col_names});
             }
@@ -730,15 +747,21 @@ pub mod table_management {
 
         impl Display for SimpleTableHandler {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let mut cursor = self.select_row(Predicate{ column: "".to_string(), operator: Operator::Less, value: Value::Text("hallo".to_string())}).unwrap().unwrap();
-                let mut result = String::new();
+                let mut cursor = self.select_row(Predicate{ column: "".to_string(), operator: Operator::Less, value: Value::new_text("hallo".to_string())}).unwrap().unwrap();
+                let mut bubble = Bubble::new(vec![40, 20]);
+                bubble.add_line(self.col_names.clone());
+                bubble.add_divider();
                 loop {
-                    result.push_str(&format!("{} \n", &cursor.value));
+                    let mut res : Vec<String> = Vec::new();
+                    for col in cursor.value.cols.clone() {
+                        res.push(col.to_string());
+                    }
+                    bubble.add_line(res);
                     if !self.next(&mut cursor).unwrap() {
                         break;
                     }
                 }
-                return write!(f,"{}", result);
+                return write!(f,"{}", bubble);
             }
         }
 
@@ -746,7 +769,7 @@ pub mod table_management {
             fn insert_row(&self, row : Row) -> Result<()> {
                 let mut row_bytes : Vec<u8> = row.into();
                 let row_size = row_bytes.len();
-                let ptr_size = (usize::BITS / 8) as usize;
+                let ptr_size = (OffsetType::BITS / 8) as usize;
                 let mut used = 0;
                 let page_header = match self.page_handler.find_fitting_page(row_size + ptr_size)? {
                     Some(p) => p,
@@ -756,10 +779,10 @@ pub mod table_management {
                 };
                 used += page_header.used + row_size + ptr_size;
                 let mut page = self.page_handler.read_page(&page_header)?; 
-                let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
-                let data_offset = usize::from_le_bytes(page[(ptr_count * ptr_size)..((ptr_count + 1) * ptr_size)].try_into().unwrap()); 
-                page[0..ptr_size].copy_from_slice(&(ptr_count+1).to_le_bytes().to_vec());
-                page[((ptr_count + 1) * ptr_size)..((ptr_count + 2) * ptr_size)].copy_from_slice(&(data_offset + row_size).to_le_bytes().to_vec());
+                let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
+                let data_offset = OffsetType::from_le_bytes(page[(ptr_count * ptr_size)..((ptr_count + 1) * ptr_size)].try_into().unwrap()) as usize;
+                page[0..ptr_size].copy_from_slice(&OffsetType::to_le_bytes((ptr_count+1) as OffsetType).to_vec());
+                page[((ptr_count + 1) * ptr_size)..((ptr_count + 2) * ptr_size)].copy_from_slice(&OffsetType::to_le_bytes((data_offset + row_size) as OffsetType).to_vec());
                 if page.len() < data_offset + row_size {
                     return Err(Error::new(ErrorKind::InvalidInput, "page to small for input"));
                 }
@@ -778,11 +801,11 @@ pub mod table_management {
                 let col_types = self.col_types.clone();
                 let mut cursor : Option<Cursor> = None;
                 self.page_handler.iterate_pages(Box::new(|header, page|{
-                    let ptr_size = (usize::BITS / 8) as usize;
-                    let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
+                    let ptr_size = (OffsetType::BITS / 8) as usize;
+                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
                     let mut last_data_offset : usize = 0;
                     for ptr_index in 0..ptr_count.clone() {
-                        let data_offset = usize::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()); 
+                        let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
                         let start : usize = page.len() - data_offset;
                         let end : usize = page.len() - last_data_offset;
                         let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
@@ -804,11 +827,11 @@ pub mod table_management {
                 let mut initial_ptr_index = cursor.ptr_index;
                 let mut initial_last_data_offset = cursor.data_offset;
                 self.page_handler.iterate_pages_from(cursor.header.clone(), Box::new(|header, page|{
-                    let ptr_size = (usize::BITS / 8) as usize;
-                    let ptr_count = usize::from_le_bytes(page[0..ptr_size].try_into().unwrap());
+                    let ptr_size = (OffsetType::BITS / 8) as usize;
+                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
                     let mut last_data_offset : usize = initial_last_data_offset;
                     for ptr_index in initial_ptr_index..ptr_count {
-                        let data_offset = usize::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()); 
+                        let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
                         let start : usize = page.len() - data_offset;
                         let end : usize = page.len() - last_data_offset;
                         let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
@@ -845,23 +868,20 @@ pub mod table_management {
             fn print_test() {
                 let path = file_management::get_base_path().join("print.test");
                 file_management::delete_file(&path);
-                let handler = Box::new(SimpleTableHandler::new(path.clone(), vec![Value::Text("".to_string()), Value::Number(0)], vec!["test".to_string()]).unwrap());
-                handler.insert_row(Row { cols: vec![Value::Text("hallo".to_string()), Value::Number(19)]});
-                handler.insert_row(Row { cols: vec![Value::Text("weltens oderaa?".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("wasser".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("welt".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                handler.insert_row(Row { cols: vec![Value::Text("".to_string()), Value::Number(2012873284237)]});
-                //               handler.insert_row(Row { cols: vec![Value::Text("felix stinkt die bahn ist scheiße kein plan was ich sonst noch schreiben soll. aber ich brauche genügend character um eine seite zu ueberfuellen.".to_string()), Value::Number(1)]}).expect_err("expected error");
+                let handler = Box::new(SimpleTableHandler::new(path.clone(), vec![Type::Text, Type::Number], vec!["test".to_string(), "number".to_string()]).unwrap());
+                handler.insert_row(Row { cols: vec![Value::new_text("hallo".to_string()), Value::new_number(19)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("weltens oderaa?".to_string()), Value::new_number(2012873237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("wasser".to_string()), Value::new_number(2018732847)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("welt".to_string()), Value::new_number(202824237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(2873284237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(201287284237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(2128784237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(0128738237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("johanna".to_string()), Value::new_number(202873284237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("test".to_string()), Value::new_number(2083284237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("zwiebel".to_string()), Value::new_number(201874237)]});
+                handler.insert_row(Row { cols: vec![Value::new_text("welt".to_string()), Value::new_number(2012873284237)]});
+                println!("\n{}", handler.page_handler);
                 println!("\n{}", handler);
             }
         }
