@@ -170,8 +170,8 @@ pub mod page_management {
         fn dealloc_page(&self, page : PageHeader) -> Result<()>;
         fn read_page(&self, page : &PageHeader) -> Result<Vec<u8>>;
         fn write_page(&self, page : PageHeader, data : Vec<u8>, size : usize) -> Result<()>;
-        fn iterate_pages<'a>(&self, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()>; 
-        fn iterate_pages_from<'a>(&self, start : PageHeader, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()>; 
+        fn iterate_pages<'a>(&self, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()>; 
+        fn iterate_pages_from<'a>(&self, start : PageHeader, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()>; 
     }
 
 #[derive(Clone)]
@@ -483,16 +483,16 @@ pub mod page_management {
                 return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
-            fn iterate_pages<'a>(&self, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()> {
+            fn iterate_pages<'a>(&self, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()> {
                 self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },|h| {
-                    return Ok(f(h.clone(), self.read_page(&h)?));
+                    return f(h.clone(), self.read_page(&h)?);
                 }, )?;
                 return Ok(());
             }
 
-            fn iterate_pages_from<'a>(&self, start : PageHeader, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> bool + 'a>) -> Result<()> {
+            fn iterate_pages_from<'a>(&self, start : PageHeader, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()> {
                 self.iterate_headers_from(start,|h| {
-                    return Ok(f(h.clone(), self.read_page(&h)?));
+                    return f(h.clone(), self.read_page(&h)?);
                 }, )?;
                 return Ok(());
             }
@@ -611,6 +611,7 @@ pub mod table_management {
         Number(Vec<u8>),
     }
 
+#[derive(Clone)]
     pub struct Row {
         cols : Vec<Value>,
     }
@@ -639,12 +640,6 @@ pub mod table_management {
         predicate : Predicate,
     }
 
-    impl Row {
-        fn fulfills(&self, predicate : &Predicate) -> bool {
-            return true;
-        }
-    }
-
     impl Display for Row {
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut result  = String::new(); 
@@ -662,7 +657,19 @@ pub mod table_management {
 
         fn new_number(value : usize) -> Self {
             return Self::Number(value.to_le_bytes().to_vec());
+        }
 
+        fn is_type(&self, t : Type) -> bool {
+            return match self {
+                Self::Text(_) => match t {
+                    Type::Text => true,
+                    _ => false,
+                },
+                Self::Number(_) => match t {
+                    Type::Number => true,
+                    _ => false,
+                }
+            }
         }
     }
 
@@ -682,12 +689,12 @@ pub mod table_management {
                 Self::Number(val) => {
                     if val.len() == std::mem::size_of::<usize>() {
                         let array: [u8; std::mem::size_of::<usize>()] = match val[..].try_into() {
-                        Ok(array) => array,
-                        Err(_) => return write!(f, "[Invalid Number]"),
-                    };
-                    return write!(f, "{}", usize::from_le_bytes(array));
+                            Ok(array) => array,
+                            Err(_) => return write!(f, "[Invalid Number]"),
+                        };
+                        return write!(f, "{}", usize::from_le_bytes(array));
                     }
-                return write!(f, "invalid number");
+                    return write!(f, "invalid number");
                 },
             }
         }
@@ -743,6 +750,32 @@ pub mod table_management {
                 let page_handler = Box::new(SimplePageHandler::new(table_path)?);
                 return Ok(SimpleTableHandler {page_handler, col_types, col_names});
             }
+
+            fn row_fulfills(&self, row: &Row, predicate : &Predicate) -> Result<bool> {
+                let col_index = self.col_names.iter().position(|name| name == &predicate.column);
+                if let Some(index) = col_index {
+                    if let Some(value) = row.cols.get(index) {
+                        let comparison_result = match (&predicate.operator, value, &predicate.value) {
+                            (Operator::Equals, Value::Text(a), Value::Text(b)) => a == b,
+                            (Operator::Equals, Value::Number(a), Value::Number(b)) => a == b,
+                            (Operator::Less, Value::Text(a), Value::Text(b)) => a < b,
+                            (Operator::Less, Value::Number(a), Value::Number(b)) => a < b,
+                            (Operator::LessOrEqual, Value::Text(a), Value::Text(b)) => a <= b,
+                            (Operator::LessOrEqual, Value::Number(a), Value::Number(b)) => a <= b,
+                            (Operator::Bigger, Value::Text(a), Value::Text(b)) => a > b,
+                            (Operator::Bigger, Value::Number(a), Value::Number(b)) => a > b,
+                            (Operator::BiggerOrEqual, Value::Text(a), Value::Text(b)) => a >= b,
+                            (Operator::BiggerOrEqual, Value::Number(a), Value::Number(b)) => a >= b,
+                            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Type mismatch in comparison")),
+                        };
+                        return Ok(comparison_result);
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column index out of bounds"));
+                    }
+                } else {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column name not found in row"));
+                }
+            }
         }
 
         impl Display for SimpleTableHandler {
@@ -765,125 +798,188 @@ pub mod table_management {
             }
         }
 
-        impl TableHandler for SimpleTableHandler {
-            fn insert_row(&self, row : Row) -> Result<()> {
-                let mut row_bytes : Vec<u8> = row.into();
-                let row_size = row_bytes.len();
-                let ptr_size = (OffsetType::BITS / 8) as usize;
-                let mut used = 0;
-                let page_header = match self.page_handler.find_fitting_page(row_size + ptr_size)? {
-                    Some(p) => p,
-                    None => {
-                        used += ptr_size;
-                        self.page_handler.alloc_page()?},
-                };
-                used += page_header.used + row_size + ptr_size;
-                let mut page = self.page_handler.read_page(&page_header)?; 
-                let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
-                let data_offset = OffsetType::from_le_bytes(page[(ptr_count * ptr_size)..((ptr_count + 1) * ptr_size)].try_into().unwrap()) as usize;
-                page[0..ptr_size].copy_from_slice(&OffsetType::to_le_bytes((ptr_count+1) as OffsetType).to_vec());
-                page[((ptr_count + 1) * ptr_size)..((ptr_count + 2) * ptr_size)].copy_from_slice(&OffsetType::to_le_bytes((data_offset + row_size) as OffsetType).to_vec());
-                if page.len() < data_offset + row_size {
-                    return Err(Error::new(ErrorKind::InvalidInput, "page to small for input"));
-                }
-                let start : usize = page.len() - (data_offset + row_size);
-                let end : usize = page.len() - data_offset;
-                page[start..end].copy_from_slice(&row_bytes);
-                self.page_handler.write_page(page_header.clone(), page, used)?;
-                return Ok(());
+    impl TableHandler for SimpleTableHandler {
+        fn insert_row(&self, row : Row) -> Result<()> {
+            let mut row_bytes : Vec<u8> = row.into();
+            let row_size = row_bytes.len();
+            let ptr_size = (OffsetType::BITS / 8) as usize;
+            let mut used = 0;
+            let page_header = match self.page_handler.find_fitting_page(row_size + ptr_size)? {
+                Some(p) => p,
+                None => {
+                    used += ptr_size;
+                    self.page_handler.alloc_page()?},
+            };
+            used += page_header.used + row_size + ptr_size;
+            let mut page = self.page_handler.read_page(&page_header)?; 
+            let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
+            let data_offset = OffsetType::from_le_bytes(page[(ptr_count * ptr_size)..((ptr_count + 1) * ptr_size)].try_into().unwrap()) as usize;
+            page[0..ptr_size].copy_from_slice(&OffsetType::to_le_bytes((ptr_count+1) as OffsetType).to_vec());
+            page[((ptr_count + 1) * ptr_size)..((ptr_count + 2) * ptr_size)].copy_from_slice(&OffsetType::to_le_bytes((data_offset + row_size) as OffsetType).to_vec());
+            if page.len() < data_offset + row_size {
+                return Err(Error::new(ErrorKind::InvalidInput, "page to small for input"));
             }
-
-            fn delete_row(&self, predicate : Predicate) -> Result<()> {
-                todo!();    
-            }
-
-            fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
-                let col_types = self.col_types.clone();
-                let mut cursor : Option<Cursor> = None;
-                self.page_handler.iterate_pages(Box::new(|header, page|{
-                    let ptr_size = (OffsetType::BITS / 8) as usize;
-                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
-                    let mut last_data_offset : usize = 0;
-                    for ptr_index in 0..ptr_count.clone() {
-                        let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
-                        let start : usize = page.len() - data_offset;
-                        let end : usize = page.len() - last_data_offset;
-                        let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
-                        let value : Row = row_from_bytes(row_bytes, col_types.clone());
-                        if value.fulfills(&predicate) {
-                            cursor = Some(Cursor {value, header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()});
-                            return true;
-                        }
-                        last_data_offset = data_offset;
-                    }
-                    return false;
-                }));
-                return Ok(cursor);
-            }
-
-            fn next(&self, cursor : &mut Cursor) -> Result<bool> {
-                let col_types = self.col_types.clone();
-                let mut found_next = false;
-                let mut initial_ptr_index = cursor.ptr_index;
-                let mut initial_last_data_offset = cursor.data_offset;
-                self.page_handler.iterate_pages_from(cursor.header.clone(), Box::new(|header, page|{
-                    let ptr_size = (OffsetType::BITS / 8) as usize;
-                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
-                    let mut last_data_offset : usize = initial_last_data_offset;
-                    for ptr_index in initial_ptr_index..ptr_count {
-                        let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
-                        let start : usize = page.len() - data_offset;
-                        let end : usize = page.len() - last_data_offset;
-                        let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
-                        let value : Row = row_from_bytes(row_bytes, col_types.clone());
-                        if value.fulfills(&cursor.predicate) {
-                            found_next = true;
-                            cursor.value = value;
-                            cursor.header = header;
-                            cursor.data_offset = data_offset;
-                            cursor.ptr_index = ptr_index+1;
-                            return true;
-                        }
-                        last_data_offset = data_offset;
-                    }
-                    initial_ptr_index = 0;
-                    initial_last_data_offset = 0;
-                    return false;
-                }));
-                return Ok(found_next);
-            }
+            let start : usize = page.len() - (data_offset + row_size);
+            let end : usize = page.len() - data_offset;
+            page[start..end].copy_from_slice(&row_bytes);
+            self.page_handler.write_page(page_header.clone(), page, used)?;
+            return Ok(());
         }
 
-        #[cfg(test)]
-        mod test {
+        fn delete_row(&self, predicate : Predicate) -> Result<()> {
+            todo!();    
+        }
 
-            use super::*;
-            use super::file_management::{
-                self, 
-                FileHandler, 
-                SimpleFileHandler
+        fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
+            let col_types = self.col_types.clone();
+            let mut cursor : Option<Cursor> = None;
+            let callback = |header : PageHeader, page : Vec<u8>| -> Result<bool> {
+                let ptr_size = (OffsetType::BITS / 8) as usize;
+                let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
+                let mut last_data_offset : usize = 0;
+                for ptr_index in 0..ptr_count.clone() {
+                    let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
+                    let start : usize = page.len() - data_offset;
+                    let end : usize = page.len() - last_data_offset;
+                    let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
+                    let value : Row = row_from_bytes(row_bytes, col_types.clone());
+                    if self.row_fulfills(&value, &predicate)? {
+                        cursor = Some(Cursor {value, header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()});
+                        return Ok(true);
+                    }
+                    last_data_offset = data_offset;
+                }
+                return Ok(false);
             };
+            self.page_handler.iterate_pages(Box::new(callback));
+            return Ok(cursor);
+        }
 
-            #[test]
-            fn print_test() {
-                let path = file_management::get_base_path().join("print.test");
-                file_management::delete_file(&path);
-                let handler = Box::new(SimpleTableHandler::new(path.clone(), vec![Type::Text, Type::Number], vec!["test".to_string(), "number".to_string()]).unwrap());
-                handler.insert_row(Row { cols: vec![Value::new_text("hallo".to_string()), Value::new_number(19)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("weltens oderaa?".to_string()), Value::new_number(2012873237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("wasser".to_string()), Value::new_number(2018732847)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("welt".to_string()), Value::new_number(202824237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(2873284237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(201287284237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(2128784237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("".to_string()), Value::new_number(0128738237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("johanna".to_string()), Value::new_number(202873284237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("test".to_string()), Value::new_number(2083284237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("zwiebel".to_string()), Value::new_number(201874237)]});
-                handler.insert_row(Row { cols: vec![Value::new_text("welt".to_string()), Value::new_number(2012873284237)]});
-                println!("\n{}", handler.page_handler);
-                println!("\n{}", handler);
-            }
+        fn next(&self, cursor : &mut Cursor) -> Result<bool> {
+            let col_types = self.col_types.clone();
+            let mut found_next = false;
+            let mut initial_ptr_index = cursor.ptr_index;
+            let mut initial_last_data_offset = cursor.data_offset;
+            self.page_handler.iterate_pages_from(cursor.header.clone(), Box::new(
+                    |header : PageHeader, page : Vec<u8>| -> Result<bool> { 
+                        let ptr_size = (OffsetType::BITS / 8) as usize;
+                        let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().unwrap()) as usize;
+                        let mut last_data_offset : usize = initial_last_data_offset;
+                        for ptr_index in initial_ptr_index..ptr_count {
+                            let data_offset = OffsetType::from_le_bytes(page[((ptr_index + 1) * ptr_size)..((ptr_index + 2) * ptr_size)].try_into().unwrap()) as usize;
+                            let start : usize = page.len() - data_offset;
+                            let end : usize = page.len() - last_data_offset;
+                            let row_bytes : Vec<u8> = page[start..end].try_into().unwrap();
+                            let value : Row = row_from_bytes(row_bytes, col_types.clone());
+                            if self.row_fulfills(&value, &cursor.predicate)? {
+                                found_next = true;
+                                cursor.value = value;
+                                cursor.header = header;
+                                cursor.data_offset = data_offset;
+                                cursor.ptr_index = ptr_index+1;
+                                return Ok(true);
+                            }
+                            last_data_offset = data_offset;
+                        }
+                        initial_ptr_index = 0;
+                        initial_last_data_offset = 0;
+                        return Ok(false);
+                    }
+            ));
+            return Ok(found_next);
         }
     }
+
+    #[cfg(test)]
+    mod test {
+
+        use super::*;
+        use super::file_management::{
+            self, 
+            FileHandler, 
+            SimpleFileHandler
+        };
+
+        #[test]
+        fn test_row_into_bytes_and_back() {
+            let row = Row {
+                cols: vec![
+                    Value::new_text("text".to_string()),
+                    Value::new_number(123),
+                ],
+            };
+            let col_types = vec![Type::Text, Type::Number];
+            let row_bytes: Vec<u8> = row.clone().into();
+            let reconstructed_row = simple::row_from_bytes(row_bytes, col_types);
+            assert_eq!(row.cols.len(), reconstructed_row.cols.len());
+            assert_eq!(row.cols[0].to_string(), reconstructed_row.cols[0].to_string());
+            assert_eq!(row.cols[1].to_string(), reconstructed_row.cols[1].to_string());
+        }
+
+        #[test]
+        fn test_simple_table_handler_creation() {
+            let table_path = PathBuf::from("/tmp/test_table");
+            let col_types = vec![Type::Text, Type::Number];
+            let col_names = vec!["Name".to_string(), "Age".to_string()];
+            let handler_result = simple::SimpleTableHandler::new(table_path, col_types, col_names);
+            assert!(handler_result.is_ok());
+        }
+
+        #[test]
+        fn test_simple_table_handler_insert_and_select() {
+            let table_path = PathBuf::from("/tmp/test_table");
+            let col_types = vec![Type::Text, Type::Number];
+            let col_names = vec!["Name".to_string(), "Age".to_string()];
+            let handler = simple::SimpleTableHandler::new(table_path, col_types.clone(), col_names).unwrap();
+            handler.insert_row(Row{cols: vec![
+                Value::new_text("Bob".to_string()),
+                Value::new_number(10)]});
+                let row = Row {
+                    cols: vec![
+                        Value::new_text("Alice".to_string()),
+                        Value::new_number(30),
+                    ],
+                };
+                // Insert the row
+                let insert_result = handler.insert_row(row.clone());
+                assert!(insert_result.is_ok());
+                // Select the row
+                let predicate = Predicate {
+                    column: "Name".to_string(),
+                    operator: Operator::Equals,
+                    value: Value::new_text("Alice".to_string()),
+                };
+                let select_result = handler.select_row(predicate);
+                assert!(select_result.is_ok());
+                let cursor_option = select_result.unwrap();
+                assert!(cursor_option.is_some());
+                let cursor = cursor_option.unwrap();
+                assert_eq!(cursor.value.cols.len(), row.cols.len());
+                assert_eq!(cursor.value.cols[0].to_string(), row.cols[0].to_string());
+                assert_eq!(cursor.value.cols[1].to_string(), row.cols[1].to_string());
+            }
+
+    }
+}
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+
+    #[test]
+    fn test_value_display_text() {
+        let text_value = Value::new_text("hello".to_string());
+        assert_eq!(text_value.to_string(), "hello");
+    }
+
+    #[test]
+    fn test_value_display_number() {
+        let number_value = Value::new_number(42);
+        assert_eq!(number_value.to_string(), "42");
+    }
+
+
+
+}
 }
