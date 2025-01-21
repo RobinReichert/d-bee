@@ -2,65 +2,114 @@
 
 pub mod file_management {
 
+
+
     use std::{fs::{self, create_dir_all, metadata, remove_dir_all, remove_file, File, OpenOptions},  io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write}, path::PathBuf};
     use dirs::home_dir;
 
+
+
+    ///Returns working directory of this project
     pub fn get_base_path() -> Result<PathBuf> {
         return Ok(home_dir().ok_or_else(||{Error::new(ErrorKind::NotFound, "home directory could not be found")})?.join(".d-bee"));
     }
 
+
+
+    ///Returns the directory tests files should be stored in
     pub fn get_test_path() -> Result<PathBuf> {
         return Ok(get_base_path()?.join("test"));
     }
 
+
+
+    ///Create a directory with path
     pub fn create_dir(path : &PathBuf) -> Result<()> {
         return create_dir_all(path);
     }
 
+
+
+    ///Delete the directory with path
     pub fn delete_dir(path : &PathBuf) -> Result<()> {
         return remove_dir_all(path);
     }
 
+
+
+    ///Create a file with path
     pub fn create_file(path : &PathBuf) -> Result<File> {
         File::create_new(path)
     }
 
+
+
+    ///Delete the file with path
     pub fn delete_file(path : &PathBuf) -> Result<()> {
         return remove_file(path);
     }
 
+
+
+    ///Returns the size of a File
     pub fn get_size(path : &PathBuf) -> Result<u64> {
         return Ok(metadata(path)?.len());
     }
 
+
+
     pub trait FileHandler {
+
+        ///Returns the path this FileHandler works in
         fn get_path(&self) -> &PathBuf;
+
+        ///Returns n bytes starting from <at>, can also return errors
         fn read_at(&self, at : usize, length : usize) -> Result<Vec<u8>>;
+
+        ///Writes data to a file at position <at>, may return an error
         fn write_at(&self, at : usize, data : Vec<u8>) -> Result<()>;
+
     }
+
+
 
     pub struct SimpleFileHandler {
+
         path : PathBuf,
+
     }
 
+
+
     impl SimpleFileHandler {
+
+
         pub fn new(path : PathBuf) -> Result<SimpleFileHandler> {
             if !path.is_file() {
                 return Err(Error::new(ErrorKind::NotFound, "the path passed is not a file or does not have right permissions"));
             }
             return Ok(SimpleFileHandler {path});
         }
+
+
     }
 
+
+
     impl FileHandler for SimpleFileHandler {
+
+
         fn get_path(&self) -> &PathBuf {
             return &self.path;
         }
 
+
         fn read_at(&self, at : usize, length : usize) -> Result<Vec<u8>> {
             let mut file = OpenOptions::new().read(true).open(&self.path)?;
+            //Move cursor to start
             file.seek(SeekFrom::Start(at as u64))?;
             let mut buffer = vec![0; length];
+            //Catch UnexpectedEof, return all other errors
             match file.read_exact(&mut buffer) {
                 Ok(()) => Ok(buffer),
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => Ok(buffer),
@@ -68,19 +117,31 @@ pub mod file_management {
             }
         }
 
+
         fn write_at(&self, at : usize, data : Vec<u8>) -> Result<()> {
             let mut file = OpenOptions::new().write(true).open(&self.path)?;
+            //Move cursor to start
             file.seek(SeekFrom::Start(at as u64))?;
+            //Write data starting from the cursor
             return file.write_all(&data);
         }
+
+
     }
+
+
 
 #[cfg(test)]
     mod tests {
 
+
+
         use super::*;
 
+
+
         #[test]
+        //Test if directories can be created and deleted without errors
         fn create_and_delete_directory_test() {
             let dir_path = get_test_path().unwrap().join("test_dir");
             create_dir(&dir_path).unwrap();
@@ -89,7 +150,10 @@ pub mod file_management {
             assert!(!dir_path.exists(), "Directory was not deleted");
         }
 
+
+
         #[test]
+        //Test if files can be created and deleted without errors
         fn create_and_delete_file_test() {
             create_dir(&get_test_path().unwrap());
             let file_path = get_test_path().unwrap().join("create_and_delete_file.test");
@@ -99,7 +163,11 @@ pub mod file_management {
             assert!(!file_path.exists(), "File was not deleted");
         }
 
+
+
         #[test]
+        //Test if data can be written and read from a file without errors and if this data changes
+        //during the process
         fn write_and_read_test() {
             create_dir(&get_test_path().unwrap());
             let file_path = get_test_path().unwrap().join("write_and_read.test");
@@ -112,14 +180,21 @@ pub mod file_management {
             delete_file(&file_path).unwrap();
         }
 
+
+
         #[test]
+        //Test if SimpleFileHandler returns an error when an invalid path is passed to the new
+        //function
         fn file_not_found_test() {
             let invalid_path = get_test_path().unwrap().join("nonexistent_file.test");
             let result = SimpleFileHandler::new(invalid_path.clone());
             assert!(result.is_err(), "Expected error when initializing handler with non-existent file");
         }
 
+
+
         #[test]
+        //Test if read_at returns a string with the right length and value
         fn read_partial_data_test() {
             create_dir(&get_test_path().unwrap());
             let file_path = get_test_path().unwrap().join("read_partial_data.test");
@@ -132,7 +207,10 @@ pub mod file_management {
             delete_file(&file_path).unwrap();
         }
 
+
+
         #[test]
+        //Test if data that is written and read beyond end of file is still correct
         fn write_beyond_eof_test() {
             let file_path = get_test_path().unwrap().join("write_beyond_eof.test");
             create_file(&file_path).unwrap();
@@ -143,80 +221,159 @@ pub mod file_management {
             assert_eq!(read_data, data, "Data written beyond EOF does not match expected data");
             delete_file(&file_path).unwrap();
         }
+
+
+
     }
+
+
 
 }
 
+
+
 pub mod page_management {
+
+
 
     use std::{
         io::{Error, ErrorKind, Result}, 
         path::PathBuf,
         fmt::{self, Display, Formatter}
     };
+
+
     use super::file_management::{
         self, 
         FileHandler, 
         SimpleFileHandler
     };
+
+
     use crate::bubble::Bubble;
+
+
 
     const PAGE_SIZE : usize = 4096;
     const HEAD_SIZE : usize = 8;
 
+
+
     pub trait PageHandler {
+
+        ///Takes the number of bytes of the data that should be stored in a page. Returns the
+        ///header of the first header that can fit the data. If no page is allocated that has
+        ///enough space left None is returned. May also return errors!
         fn find_fitting_page(&self, size : usize) -> Result<Option<PageHeader>>;
+
+        ///Takes a page id and checks if the page with the id is allocated. If so the page header
+        ///of that page is returned, otherwise None. May return errors!
         fn is_page(&self, id : usize) -> Result<Option<PageHeader>>;
+
+        ///Allocate a new page and returns its page header. May return errors!
         fn alloc_page(&self) -> Result<PageHeader>;
+
+        ///Takes a page header of the page that should be deallocated. It then gets deallocated and
+        ///has to be allocated again before use. May return errors!
         fn dealloc_page(&self, page : PageHeader) -> Result<()>;
+
+        ///Takes a page header of the page that should be read. The page bytes are then returned.
+        ///May return errors!
         fn read_page(&self, page : &PageHeader) -> Result<Vec<u8>>;
+
+        ///Takes a page header of the page that should be written to the data and the size. The
+        ///size is used for the find_fitting_page method and does not necessarily have to be the
+        ///length of data. May return errors!
         fn write_page(&self, page : PageHeader, data : Vec<u8>, size : usize) -> Result<()>;
+
+        ///Takes a callback function f that gets executed for every allocated page bytes. When the
+        ///callback returns true the iteration stops. Errors returned by the callback are passed
+        ///through this function. Errors by this method can be returned as well!
         fn iterate_pages<'a>(&self, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()>; 
+
+        ///Works the same as iterate_pages but takes a page header additionally. The pages get
+        ///iterated starting (inclusive) from the page corresponding to the header. May return
+        ///errors!
         fn iterate_pages_from<'a>(&self, start : PageHeader, f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()>; 
+
     }
+
+
 
 #[cfg(test)]
     pub trait TestPageHandler : Display + PageHandler {}
 
+
+
 #[derive(Clone)]
     pub struct  PageHeader {
+
+        ///Used to calculate the page start
         pub id : usize,
+
+        ///Used for the find fitting_page_method
         pub used : usize,
+
         next : Option<usize>,
         header_page_id : Option<usize>,
         header_offset : Option<usize>,
         previous_page_id : Option<usize>,
     }
 
+
+
     impl PageHeader {
+
+
         fn new(id : usize, next : Option<usize>, used : usize, header_page_id : Option<usize>, header_offset : Option<usize>, previous_page_id : Option<usize>) -> PageHeader {
             return PageHeader{id, used,next, header_page_id, header_offset, previous_page_id};
         }
 
+
         fn get_size() -> usize {
             return 24;
         }
+        
+
     }
+
+
 
     pub mod simple {
 
+
+
         use super::*;
+
+
 
         pub struct SimplePageHandler {
             file_handler : Box<dyn FileHandler>
         }
 
+
+
         impl TryFrom<Vec<u8>> for PageHeader {
+
+
             type Error = std::io::Error;
+
+
             fn try_from(value: Vec<u8>) -> std::result::Result<Self, Self::Error> {
                 let id = usize::from_le_bytes(value[0..8].try_into().map_err(|_| Error::new(ErrorKind::UnexpectedEof, "not enough bytes for id"))?);
                 let next = usize::from_le_bytes(value[8..16].try_into().map_err(|_| Error::new(ErrorKind::UnexpectedEof, "not enough bytes for next"))?);
                 let used = usize::from_le_bytes(value[16..24].try_into().map_err(|_| Error::new(ErrorKind::UnexpectedEof, "not enough bytes for used"))?);
                 return Ok(PageHeader {id, used, next: if next == 0 {None} else {Some(next)}, header_page_id: None, header_offset: None, previous_page_id: None});
             }
+
+
         }
 
+
+
         impl Into<Vec<u8>> for PageHeader {
+
+
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 buffer.extend(&self.id.to_le_bytes());
@@ -224,15 +381,39 @@ pub mod page_management {
                 buffer.extend(&self.used.to_le_bytes());
                 return buffer;
             }
+
+
         }
 
+
+
         impl Display for PageHeader {
+
+
             fn fmt(&self, f: &mut Formatter) -> fmt::Result {
                 return write!(f, "id: {}, used: {}, next {}", self.id, self.used, self.next.map_or("none".to_string(), |n| n.to_string()));
             }
+
+
         }
 
+
+
+        impl PageHeader {
+
+
+            fn get_first() -> PageHeader {
+                return PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  }
+            }
+
+
+        }
+
+
+
         impl SimplePageHandler {
+
+
             pub fn new(page_path : PathBuf) -> Result<SimplePageHandler> {
                 file_management::create_file(&page_path);                        
                 let file_handler = Box::new(SimpleFileHandler::new(page_path)?);
@@ -245,37 +426,55 @@ pub mod page_management {
                 return Ok(page_handler);
             }
 
+
             fn push_free(&self, id : usize) -> Result<()> {
+                //Load previous first free page id
                 let next_bytes : Vec<u8> = self.file_handler.read_at(0, 8)?;
+                //Update first free page id
                 self.file_handler.write_at(0, id.to_le_bytes().to_vec())?;
+                //Set next free page id of the new id to the previous first
                 self.file_handler.write_at(SimplePageHandler::calculate_page_start(id), next_bytes)?;
                 return Ok(());
             }
 
+
             fn pop_free(&self) -> Result<usize> {
+                //Load the first free page id 
                 let first_page : usize = usize::from_le_bytes(self.file_handler.read_at(0, 8)?.try_into().map_err(|_|{Error::new(ErrorKind::UnexpectedEof, "not enough bytes for first page")})?);
+                //Load the next free page id from the first free page
                 let second_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(first_page), 8)?;
+                //Check if the second free page is the tail of the free list
                 if second_page_bytes != vec![0, 0, 0, 0, 0, 0, 0, 0] {
+                //If it is not set the first free page to the second page
                     self.file_handler.write_at(0, second_page_bytes)?;
                 }else{
+                //Otherwise increment first page id by one since it has to be first free page all
+                //time
                     self.file_handler.write_at(0, (first_page + 1).to_le_bytes().to_vec())?;
                 }
                 return Ok(first_page);
             }
 
+
             fn calculate_page_start(id : usize) -> usize {
                 return id * PAGE_SIZE + HEAD_SIZE;  
             }
 
-            ///Iterates over all headers once until true is returned from f
+
+            ///Iterates over all headers starting from the header passed to the function, once until true is returned from f
             fn iterate_headers_from<F>(&self, header : PageHeader, mut f : F) -> Result<()> where F : FnMut(PageHeader) -> Result<bool> {
                 let mut current_page_id : usize = header.header_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain header_page_id")})?;
                 let mut previous_page_id = header.previous_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain previous")})?;
                 let mut  initial_header_offset : usize = header.header_offset.ok_or_else(||{Error::new(ErrorKind::InvalidInput, "header did not contain offset")})?;
+                //Loop till the current header does not have a next_page_id
                 loop {
+                    //Load current header page and extract the own header in order to find the
+                    //next_page_id and the number of headers stored in the page
                     let current_header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(current_page_id), PAGE_SIZE)?;
                     let own_header = PageHeader::try_from(current_header_page_bytes[0..PageHeader::get_size()].to_vec())?;
+                    //Loop through all headers in the header page
                     for current_header_offset in (initial_header_offset..own_header.used).step_by(PageHeader::get_size()) {
+                        //For every header set the correct header values and execute f
                         if let Some(header_bytes) = current_header_page_bytes.get(current_header_offset..current_header_offset + PageHeader::get_size()) {
                             let mut current_header = PageHeader::try_from(header_bytes.to_vec())?;
                             current_header.header_page_id = Some(current_page_id);
@@ -294,12 +493,17 @@ pub mod page_management {
                     }else{
                         break;
                     }
+                    //Reset initial_offset since the offset from the header passed to the function
+                    //should only be used in the first header_page
                     initial_header_offset = PageHeader::get_size();
                 }
                 return Ok(());
             }
 
+
         }
+        
+
 
         #[cfg(test)]
         impl Display for SimplePageHandler {
@@ -371,22 +575,30 @@ pub mod page_management {
             }
         }
 
+
+
 #[cfg(test)]
         impl TestPageHandler for SimplePageHandler {}
 
+
+
         impl PageHandler for SimplePageHandler {
+            
+
             fn find_fitting_page(&self, size : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
                 let callback = |current_header:PageHeader| {
+                    //Set header to current header and exit iteration if page fits data of size
                     if PAGE_SIZE - current_header.used >= size {
                         header = Some(current_header);
                         return Ok(true);
                     }
                     return Ok(false);
                 };
-                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },callback)?;
+                self.iterate_headers_from(PageHeader::get_first(), callback)?;
                 return Ok(header);
             }
+
 
             fn is_page(&self, id : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
@@ -397,9 +609,10 @@ pub mod page_management {
                     }
                     return Ok(false);
                 };
-                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  }, callback)?;
+                self.iterate_headers_from(PageHeader::get_first(), callback)?;
                 return Ok(header);
             }
+
 
             fn alloc_page(&self) -> Result<PageHeader> {
                 let mut current_header_page_id : usize = 0;
@@ -438,6 +651,7 @@ pub mod page_management {
                 return Err(Error::new(ErrorKind::Other, "unexpected error"));
             }
 
+
             fn dealloc_page(&self, page_header : PageHeader) -> Result<()> {
                 if let Some(next_page_header_id) = page_header.next {
                     self.dealloc_page(self.is_page(next_page_header_id)?.ok_or(ErrorKind::InvalidInput)?);
@@ -467,36 +681,46 @@ pub mod page_management {
                 return Ok(());
             }
 
+
             fn read_page(&self, page_header : &PageHeader) -> Result<Vec<u8>> {
                 return self.file_handler.read_at(SimplePageHandler::calculate_page_start(page_header.id), PAGE_SIZE);
                 return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
+
             fn write_page(&self, page_header : PageHeader, data : Vec<u8>, size : usize) -> Result<()> {
+                //Check if data fits into one page
                 if data.len() > PAGE_SIZE {
                     return Err(Error::new(ErrorKind::ArgumentListTooLong, "data is to big to write into one page"));
                 }
+                //Load all data required to change the content of a page
                 let header_page_id = page_header.header_page_id.ok_or(ErrorKind::InvalidInput)?;
                 let mut header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(header_page_id), PAGE_SIZE)?;
                 let header_offset : usize = page_header.header_offset.ok_or_else(|| {Error::new(ErrorKind::NotFound, "header did not have a header_offset")})?;
                 let header_bytes = header_page_bytes.get(header_offset..(header_offset + PageHeader::get_size())).ok_or_else(|| {Error::new(ErrorKind::Other, "unexpected error")})?;
                 let mut own_header = PageHeader::try_from(header_bytes.to_vec())?;
+                //Check if the page header passed has the same id as the header loaded from storage
                 if own_header.id == page_header.id {
+                    //Update size and write back header with new size as well as the page itself
                     own_header.used = size;
                     header_page_bytes[header_offset..(header_offset + PageHeader::get_size())].copy_from_slice(&Into::<Vec<u8>>::into(own_header));
                     self.file_handler.write_at(SimplePageHandler::calculate_page_start(page_header.id), data)?;
                     self.file_handler.write_at(SimplePageHandler::calculate_page_start(page_header.header_page_id.ok_or_else(||{Error::new(ErrorKind::NotFound, "page header did not contain a header_page_id")})?), header_page_bytes)?;
                     return Ok(());
                 }
+                //Can only be returned if header did not have the same values as the header it
+                //referred to in storage
                 return Err(Error::new(ErrorKind::InvalidInput, "wrong header type"));
             }
 
+
             fn iterate_pages<'a>(&self, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()> {
-                self.iterate_headers_from(PageHeader{ header_page_id: Some(0), previous_page_id: Some(0), header_offset: Some(PageHeader::get_size()), id: 0, used: 0, next: None  },|h| {
+                self.iterate_headers_from(PageHeader::get_first(),|h| {
                     return f(h.clone(), self.read_page(&h)?);
                 }, )?;
                 return Ok(());
             }
+
 
             fn iterate_pages_from<'a>(&self, start : PageHeader, mut f : Box<dyn FnMut(PageHeader, Vec<u8>) -> Result<bool> + 'a>) -> Result<()> {
                 self.iterate_headers_from(start,|h| {
@@ -504,12 +728,20 @@ pub mod page_management {
                 }, )?;
                 return Ok(());
             }
+
+
         }
+
+
 
         #[cfg(test)]
         mod test {
 
+
+
             use super::*;
+
+
 
             #[test]
             fn read_write_test() {
@@ -523,6 +755,8 @@ pub mod page_management {
                 assert_eq!(data, read_data);
             }
 
+
+
             #[test]
             fn find_fitting_page_test() {
                 let path = file_management::get_test_path().unwrap().join("find_fitting_page.test");
@@ -535,6 +769,8 @@ pub mod page_management {
                 assert_eq!(page2.id, fitting_page.unwrap().id);
             }
 
+
+
             #[test]
             fn dont_find_fitting_page_test() {
                 let path = file_management::get_test_path().unwrap().join("dont_find_fitting_page.test");
@@ -546,6 +782,8 @@ pub mod page_management {
                 assert!(matches!(fitting_page, None), "expected none but found some");
             }
 
+
+
             #[test]
             fn invalid_dealloc_test() {
                 let path = file_management::get_test_path().unwrap().join("invalid_dealloc.test");
@@ -554,6 +792,8 @@ pub mod page_management {
                 let result = handler.dealloc_page(PageHeader::new(999, None, 0, None, None, None));
                 assert!(result.is_err(), "Expected error when deallocating non-existent page");
             }
+
+
 
             #[test]
             fn free_list_integrity_test() {
@@ -572,6 +812,8 @@ pub mod page_management {
                 assert_eq!(page4.id, id1); // Reuse from free list
             }
 
+
+
             #[test]
             fn header_conversion_test() {
                 let original_header = PageHeader::new(1, Some(2), 50, None, None, None);
@@ -582,15 +824,25 @@ pub mod page_management {
                 assert_eq!(original_header.used, reconstructed_header.used);
             }
 
+
+
         }
 
+
+
     }
+
+
 
 }
 
 pub mod table_management {
 
+
+
     use super::{file_management, page_management::{PageHandler, PageHeader, simple::{SimplePageHandler}}};
+
+
     use std::{
         io::{self, Error, ErrorKind, Result},
         path::PathBuf,
@@ -598,16 +850,37 @@ pub mod table_management {
         fmt::{self, Display, Formatter}
     };
 
+
     use crate::bubble::Bubble;
 
+
+
     pub trait TableHandler {
+
+        ///Takes a row object and inserts it into the table this handler is working on. This
+        ///method may return errors!
         fn insert_row(&self, row : Row) -> Result<()>;
+
+        ///This method takes a predicate and returns a cursor which holds one value to a row and a
+        ///reference to the next cursor which fulfill the predicates claims. In case no row does so
+        ///None is returned. Errors may be returned!
         fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>>;
+
+        ///This method takes a predicate and removes all rows that fulfill the predicates claims
+        ///from the table this handler works in. May fail and return an error!
         fn delete_row(&self, predicate : Predicate) -> Result<()>;
+
+        ///Takes a cursor and updates it to point at the next row. If a next row was found this
+        ///method returns true. Otherwise false is returned. Errors may be thrown!!
         fn next(&self, cursor : &mut Cursor) -> Result<bool>;
+
     }
 
+
+
     pub trait TestTableHandler : TableHandler + Display {}
+
+
 
 #[derive(Clone)]
     pub enum Type {
@@ -615,16 +888,22 @@ pub mod table_management {
         Number,
     }
 
+
+
 #[derive(Clone)]
     pub enum Value {
         Text(Vec<u8>),
         Number(Vec<u8>),
     }
 
+
+
 #[derive(Clone)]
     pub struct Row {
         cols : Vec<Value>,
     }
+
+
 
 #[derive(Clone)]
     pub enum Operator {
@@ -635,12 +914,16 @@ pub mod table_management {
         BiggerOrEqual,
     }
 
+
+
 #[derive(Clone)]
     pub struct Predicate {
         column : String,
         operator : Operator,
         value : Value,
     }
+
+
 
     pub struct Cursor {
         pub value : Row,
@@ -650,8 +933,12 @@ pub mod table_management {
         predicate : Predicate,
     }
 
+
+
     #[cfg(test)]
     impl Display for Row {
+
+
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             let mut result  = String::new(); 
             for col in &self.cols {
@@ -659,41 +946,48 @@ pub mod table_management {
             }
             return write!(f, "{}", result);
         }
+
+
     }
 
+
+
     impl Value {
+
+
         fn new_text(value : String) -> Self {
             return Self::Text(value.as_bytes().to_vec());
         }
+
 
         fn new_number(value : usize) -> Self {
             return Self::Number(value.to_le_bytes().to_vec());
         }
 
-        fn is_type(&self, t : Type) -> bool {
-            return match self {
-                Self::Text(_) => match t {
-                    Type::Text => true,
-                    _ => false,
-                },
-                Self::Number(_) => match t {
-                    Type::Number => true,
-                    _ => false,
-                }
-            }
-        }
+
     }
 
+
+
     impl Into<Vec<u8>> for Value {
+
+
         fn into(self) -> Vec<u8> {
             match self { 
                 Self::Text(val) => {val},
                 Self::Number(val) => {val},
             }
         }
+
+
     }
+
+
+
 #[cfg(test)]
     impl Display for Value {
+
+
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             match self { 
                 Self::Text(val) => write!(f, "{}", String::from_utf8(val.to_vec()).unwrap()),
@@ -709,13 +1003,23 @@ pub mod table_management {
                 },
             }
         }
+
+
     }
+
+
 
     pub mod simple {
 
-        type OffsetType = u16; //Bytes should always be >= ld(PAGE_SIZE)
+
 
         use super::*;
+
+
+        //Bytes should always be >= log_2(PAGE_SIZE)
+        type OffsetType = u16;
+
+
 
         pub struct SimpleTableHandler {
             page_handler : Box<dyn PageHandler>,
@@ -723,7 +1027,11 @@ pub mod table_management {
             col_names : Vec<String>,
         }
 
+
+
         impl Into<Vec<u8>> for Row {
+
+
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let offset_size = (OffsetType::BITS / 8) as usize;
@@ -737,7 +1045,11 @@ pub mod table_management {
                 }
                 return buffer;
             }
+
+
         }
+
+
 
         fn row_from_bytes(bytes : Vec<u8>, col_types : Vec<Type>) -> Result<Row> {
             let offset_size = (OffsetType::BITS / 8) as usize;
@@ -756,11 +1068,16 @@ pub mod table_management {
             return Ok(row);
         }
 
+
+
         impl SimpleTableHandler {
+
+
             fn new(table_path : PathBuf, col_types : Vec<Type>, col_names : Vec<String>) -> Result<SimpleTableHandler> {
                 let page_handler = Box::new(SimplePageHandler::new(table_path)?);
                 return Ok(SimpleTableHandler {page_handler, col_types, col_names});
             }
+
 
             fn row_fulfills(&self, row: &Row, predicate : &Predicate) -> Result<bool> {
                 let col_index = self.col_names.iter().position(|name| name == &predicate.column);
@@ -787,9 +1104,16 @@ pub mod table_management {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column name not found in row"));
                 }
             }
+
+
         }
+
+
+
 #[cfg(test)]
         impl Display for SimpleTableHandler {
+
+
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 let mut cursor = self.select_row(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)}).unwrap().unwrap();
                 let mut bubble = Bubble::new(vec![40, 20]);
@@ -810,12 +1134,20 @@ pub mod table_management {
                 }
                 return write!(f,"{}", bubble);
             }
+
+
         }
 
-    #[cfg(test)]
+
+
+        #[cfg(test)]
         impl TestTableHandler for SimpleTableHandler {}
 
+
+
         impl TableHandler for SimpleTableHandler {
+
+
             fn insert_row(&self, row : Row) -> Result<()> {
                 let mut row_bytes : Vec<u8> = row.into();
                 let row_size = row_bytes.len();
@@ -843,9 +1175,13 @@ pub mod table_management {
                 return Ok(());
             }
 
+
+
             fn delete_row(&self, predicate : Predicate) -> Result<()> {
                 todo!();    
             }
+
+
 
             fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
                 let col_types = self.col_types.clone();
@@ -873,6 +1209,8 @@ pub mod table_management {
                 self.page_handler.iterate_pages(Box::new(callback));
                 return Ok(cursor);
             }
+
+
 
             fn next(&self, cursor : &mut Cursor) -> Result<bool> {
                 let col_types = self.col_types.clone();
@@ -909,17 +1247,27 @@ pub mod table_management {
                 ));
                 return Ok(found_next);
             }
+
+
         }
+
+
 
         #[cfg(test)]
         mod test {
 
+
+
             use super::*;
+
+
             use super::file_management::{
                 self, 
                 FileHandler, 
                 SimpleFileHandler
             };
+
+
 
             #[test]
             fn row_into_bytes_and_back_test_test() {
@@ -937,6 +1285,8 @@ pub mod table_management {
                 assert_eq!(row.cols[1].to_string(), reconstructed_row.cols[1].to_string());
             }
 
+
+
             #[test]
             fn simple_table_handler_creation_test() {
                 let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_creation.test");
@@ -946,6 +1296,8 @@ pub mod table_management {
                 let handler_result = simple::SimpleTableHandler::new(table_path, col_types, col_names);
                 assert!(handler_result.is_ok());
             }
+
+
 
             #[test]
             fn test_simple_table_handler_insert_and_select() {
@@ -981,19 +1333,33 @@ pub mod table_management {
                 assert_eq!(cursor.value.cols[0].to_string(), row.cols[0].to_string());
                 assert_eq!(cursor.value.cols[1].to_string(), row.cols[1].to_string());
             }
+
+
+
         }
+
+
+
     }
+
+
 
 #[cfg(test)]
     mod test {
 
+
+
         use super::*;
+
+
 
         #[test]
         fn test_value_display_text() {
             let text_value = Value::new_text("hello".to_string());
             assert_eq!(text_value.to_string(), "hello");
         }
+
+
 
         #[test]
         fn test_value_display_number() {
@@ -1002,5 +1368,9 @@ pub mod table_management {
         }
 
 
+
     }
+
+
+
 }
