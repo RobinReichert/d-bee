@@ -1011,10 +1011,22 @@ pub mod table_management {
 
     pub mod simple {
 
+     
+        //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
+        //| row_count  | row_offset_1 | row_offset_2 | ... | row_offset_(row_count) |            | row_data_(row_count) | ... | row_data_2 | row_data_1 |
+        //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
+        //| OffsetType | OffsetType   | OffsetType   | ... | Offset_Type            |            | Vec<u8>              | ... | Vec<u8>    | Vec<u8>    |
+        //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
+        //| number of  | number of    | - || -       | ... | - || -                 | free space | contains data of one | ... | - || -     | - || -     |
+        //| rows in    | bytes from   |              | ... |                        |            | row                  | ... |            |            |
+        //| this page  | end of page  |              | ... |                        |            |                      | ... |            |            |
+        //|            | to start of  |              | ... |                        |            |                      | ... |            |            |
+        //|            | row_data     |              | ... |                        |            |                      | ... |            |            |
+        //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
 
 
         use super::*;
-
+ 
 
         //Bytes should always be >= log_2(PAGE_SIZE)
         type OffsetType = u16;
@@ -1028,10 +1040,22 @@ pub mod table_management {
         }
 
 
+        //+--------------+--------------+-----+------------------------+------------+------------+-----+----------------------+
+        //| col_offset_1 | col_offset_2 | ... | col_offset_(col_count) | col_data_1 | col_data_2 | ... | col_data_(col_count) |
+        //+--------------+--------------+-----+------------------------+------------+------------+-----+----------------------+
+        //| OffsetType   | OffsetType   | ... | Offset_Type            | Vec<u8>    | Vec<u8>    | ... | Vec<u8>              |
+        //+--------------+--------------+-----+------------------------+------------+------------+-----+----------------------+
+        //| number of    | - || -       | ... | - || -                 | contains   | - || -     | ... | - || -               |
+        //| bytes from   |              | ... |                        | col_data   |            | ... |                      |
+        //| start of row |              | ... |                        |            |            | ... |                      |
+        //| to start of  |              | ... |                        |            |            | ... |                      |
+        //| col_data     |              | ... |                        |            |            | ... |                      |
+        //+--------------+--------------+-----+------------------------+------------+------------+-----+----------------------+
+
 
         impl Into<Vec<u8>> for Row {
 
-
+    
             fn into(self) -> Vec<u8> {
                 let mut buffer = Vec::new();
                 let offset_size = (OffsetType::BITS / 8) as usize;
@@ -1178,7 +1202,31 @@ pub mod table_management {
 
 
             fn delete_row(&self, predicate : Predicate) -> Result<()> {
-                todo!();    
+                let col_types = self.col_types.clone();
+                let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
+                    let ptr_size = (OffsetType::BITS / 8) as usize;
+                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
+                    let mut last_data_offset : usize = 0;
+                    for ptr_index in 0..ptr_count.clone() {
+                        let start = (ptr_index + 1) * ptr_size;
+                        let end = (ptr_index + 2) * ptr_size;
+                        let data_offset = OffsetType::from_le_bytes(page[start..end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
+                        let start : usize = page.len() - data_offset;
+                        let end : usize = page.len() - last_data_offset;
+                        let row_bytes : Vec<u8> = page[start..end].into();
+                        let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
+                        if self.row_fulfills(&value, &predicate)? {
+                            todo!();
+                            page.drain(start..end); 
+                            self.page_handler.write_page(header.clone(), page, header.used);
+                            return Ok(true);
+                        }
+                        last_data_offset = data_offset;
+                    }
+                    return Ok(false);
+                };
+                self.page_handler.iterate_pages(Box::new(callback))?;
+                return Ok(());
             }
 
 
@@ -1206,7 +1254,7 @@ pub mod table_management {
                     }
                     return Ok(false);
                 };
-                self.page_handler.iterate_pages(Box::new(callback));
+                self.page_handler.iterate_pages(Box::new(callback))?;
                 return Ok(cursor);
             }
 
@@ -1244,7 +1292,7 @@ pub mod table_management {
                             initial_last_data_offset = 0;
                             return Ok(false);
                         }
-                ));
+                ))?;
                 return Ok(found_next);
             }
 
@@ -1324,6 +1372,9 @@ pub mod table_management {
                     operator: Operator::Equals,
                     value: Value::new_number(30),
                 };
+                println!("before: {}", handler);
+                handler.delete_row(predicate.clone()).unwrap();
+                println!("after: {}", handler);
                 let select_result = handler.select_row(predicate);
                 assert!(select_result.is_ok());
                 let cursor_option = select_result.unwrap();
