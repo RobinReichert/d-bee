@@ -1248,39 +1248,48 @@ pub mod table_management {
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
                     let mut new_used = header.used;
                     let ptr_size = (OffsetType::BITS / 8) as usize;
+                    //Get pointer count in order to then iterate over all rows in the page. 
                     let mut ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
-                    let mut last_data_offset : usize = 0;
+                    let mut previous_data_offset : usize = 0;
+                    //Get offset of last page
                     let last_offset_start = (ptr_count)*ptr_size;
                     let last_offset_end = (ptr_count+1)*ptr_size;
                     let mut last_offset = OffsetType::from_le_bytes(page[last_offset_start..last_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for last_offset")})?) as usize;
+                    //Iterate over all rows in the page
                     for ptr_index in 0..ptr_count.clone() {
-                        let start = (ptr_index + 1) * ptr_size;
-                        let end = (ptr_index + 2) * ptr_size;
-                        let data_offset = OffsetType::from_le_bytes(page[start..end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
+                        //Get the row
+                        let current_offset_start = (ptr_index + 1) * ptr_size;
+                        let current_offset_end = (ptr_index + 2) * ptr_size;
+                        let data_offset = OffsetType::from_le_bytes(page[current_offset_start..current_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
                         let data_start : usize = page.len() - data_offset;
-                        let data_end : usize = page.len() - last_data_offset;
+                        let data_end : usize = page.len() - previous_data_offset;
                         let row_bytes : Vec<u8> = page[data_start..data_end].into();
                         let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
                         if self.row_fulfills(&value, &predicate)? {
+                            //Shift the data left of the deleted row to the right, just over it
                             let row_size = data_end - data_start;
                             let last_data_start = page.len()-last_offset;
                             let remainder_bytes = &page[last_data_start..data_start].to_vec();
                             page[(data_end-remainder_bytes.len())..data_end].copy_from_slice(remainder_bytes);
-                            for j in ptr_index..ptr_count {
-                                let start = (j + 1) * ptr_size;
-                                let end = (j + 2) * ptr_size;
+                            for remaining_index in ptr_index..ptr_count {
+                                //Shift the data_offsets to the left over the deleted data_offset
+                                let start = (remaining_index + 1) * ptr_size;
+                                let end = (remaining_index + 2) * ptr_size;
                                 let mut new_data_offset = OffsetType::from_le_bytes(page[start..end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
                                 new_data_offset -= row_size;
-                                let new_start = j * ptr_size;
-                                let new_end = (j+1) * ptr_size;
+                                let new_start = remaining_index * ptr_size;
+                                let new_end = (remaining_index+1) * ptr_size;
                                 page[new_start..new_end].copy_from_slice(&OffsetType::to_le_bytes(new_data_offset as OffsetType).to_vec());
                             }
+                            //Adjust other variables
                             new_used -= (row_size + ptr_size);
+                            last_offset += row_size;
                             ptr_count -= 1;
                         }
-                        last_data_offset = data_offset;
+                        previous_data_offset = data_offset;
                     }
                     if new_used != header.used {
+                        //Write back page if it changed
                         page[0..ptr_size].copy_from_slice(&OffsetType::to_le_bytes(ptr_count as OffsetType).to_vec());
                         self.page_handler.write_page(header.clone(), page, new_used); 
                     }
