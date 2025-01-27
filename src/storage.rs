@@ -351,7 +351,49 @@ pub mod page_management {
             file_handler : Box<dyn FileHandler>
         }
 
+        
+        //+------------+-------------+-------------+
+        //| id         | next        | used        |
+        //+------------+-------------+-------------+
+        //| usize      | usize       | usize       |
+        //+------------+-------------+-------------+
+        //| id of      | if there    | this is     |
+        //| associated | is overflow | used for    |
+        //| page       | this is the | page alloc  |
+        //|            | id of the   | and fitting |
+        //|            | next page   | page search |
+        //+------------+-------------+-------------+
+        
 
+        //+----+--------------------------------------------------+
+        //|head|next free page at: 2                              | head of free list points to the first free page 
+        //+----+--------------------------------------------------+
+        //|0   |id: 0, used: 96, next 5                           | header page contains headers of other pages 
+        //|0   |id: 1, used: 0, next none                         |
+        //|0   |id: 3, used: 0, next none                         |
+        //|0   |id: 4, used: 0, next none                         |
+        //+----+--------------------------------------------------+
+        //|1   |..................................................| header page of this page is 0
+        //+----+--------------------------------------------------+
+        //|2   |6                                                 | this page is not allocated anymore and page 6 is the next in free list
+        //+----+--------------------------------------------------+
+        //|3   |..................................................| header page of this page is 0
+        //+----+--------------------------------------------------+
+        //|4   |..................................................| header page of this page is 0
+        //+----+--------------------------------------------------+
+        //|5   |id: 5, used: 72, next none                        | next page of page 0 
+        //|5   |id: 7, used: 0, next none                         |
+        //|5   |id: 8, used: 0, next none                         |
+        //+----+--------------------------------------------------+
+        //|6   |9                                                 | this page is not allocated anymore and page 9 is the next free page 
+        //+----+--------------------------------------------------+
+        //|7   |..................................................| header page is 5
+        //+----+--------------------------------------------------+
+        //|8   |..................................................| header page is 5
+        //+----+--------------------------------------------------+
+        //|9   |                                                  | 
+        //+----+--------------------------------------------------+
+        
 
         impl TryFrom<Vec<u8>> for PageHeader {
 
@@ -614,6 +656,10 @@ pub mod page_management {
             }
 
 
+            //+--
+            //|
+
+
             fn alloc_page(&self) -> Result<PageHeader> {
                 let mut current_header_page_id : usize = 0;
                 let mut new_page_id = self.pop_free()?;
@@ -824,14 +870,10 @@ pub mod page_management {
                 assert_eq!(original_header.used, reconstructed_header.used);
             }
 
-
-
         }
 
 
-
     }
-
 
 
 }
@@ -1011,7 +1053,7 @@ pub mod table_management {
 
     pub mod simple {
 
-     
+  
         //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
         //| row_count  | row_offset_1 | row_offset_2 | ... | row_offset_(row_count) |            | row_data_(row_count) | ... | row_data_2 | row_data_1 |
         //+------------+--------------+--------------+-----+------------------------+------------+----------------------+-----+------------+------------+
@@ -1204,24 +1246,43 @@ pub mod table_management {
             fn delete_row(&self, predicate : Predicate) -> Result<()> {
                 let col_types = self.col_types.clone();
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
+                    let mut new_used = header.used;
                     let ptr_size = (OffsetType::BITS / 8) as usize;
-                    let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
+                    let mut ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
                     let mut last_data_offset : usize = 0;
+                    let last_offset_start = (ptr_count)*ptr_size;
+                    let last_offset_end = (ptr_count+1)*ptr_size;
+                    let mut last_offset = OffsetType::from_le_bytes(page[last_offset_start..last_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for last_offset")})?) as usize;
                     for ptr_index in 0..ptr_count.clone() {
                         let start = (ptr_index + 1) * ptr_size;
                         let end = (ptr_index + 2) * ptr_size;
                         let data_offset = OffsetType::from_le_bytes(page[start..end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
-                        let start : usize = page.len() - data_offset;
-                        let end : usize = page.len() - last_data_offset;
-                        let row_bytes : Vec<u8> = page[start..end].into();
+                        let data_start : usize = page.len() - data_offset;
+                        let data_end : usize = page.len() - last_data_offset;
+                        let row_bytes : Vec<u8> = page[data_start..data_end].into();
                         let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
                         if self.row_fulfills(&value, &predicate)? {
-                            todo!();
-                            page.drain(start..end); 
-                            self.page_handler.write_page(header.clone(), page, header.used);
-                            return Ok(true);
+                            let row_size = data_end - data_start;
+                            let last_data_start = page.len()-last_offset;
+                            let remainder_bytes = &page[last_data_start..data_start].to_vec();
+                            page[(data_end-remainder_bytes.len())..data_end].copy_from_slice(remainder_bytes);
+                            for j in ptr_index..ptr_count {
+                                let start = (j + 1) * ptr_size;
+                                let end = (j + 2) * ptr_size;
+                                let mut new_data_offset = OffsetType::from_le_bytes(page[start..end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for data_offset")})?) as usize;
+                                new_data_offset -= row_size;
+                                let new_start = j * ptr_size;
+                                let new_end = (j+1) * ptr_size;
+                                page[new_start..new_end].copy_from_slice(&OffsetType::to_le_bytes(new_data_offset as OffsetType).to_vec());
+                            }
+                            new_used -= (row_size + ptr_size);
+                            ptr_count -= 1;
                         }
                         last_data_offset = data_offset;
+                    }
+                    if new_used != header.used {
+                        page[0..ptr_size].copy_from_slice(&OffsetType::to_le_bytes(ptr_count as OffsetType).to_vec());
+                        self.page_handler.write_page(header.clone(), page, new_used); 
                     }
                     return Ok(false);
                 };
@@ -1354,17 +1415,18 @@ pub mod table_management {
                 let col_types = vec![Type::Text, Type::Number];
                 let col_names = vec!["Name".to_string(), "Age".to_string()];
                 let handler = simple::SimpleTableHandler::new(table_path, col_types.clone(), col_names).unwrap();
-                handler.insert_row(Row{cols: vec![
-                    Value::new_text("Bob".to_string()),
-                    Value::new_number(10)]});
                 let row = Row {
                     cols: vec![
                         Value::new_text("Alice".to_string()),
                         Value::new_number(30),
                     ],
                 };
+                let other_row = Row{cols: vec![
+                    Value::new_text("Bob".to_string()),
+                    Value::new_number(10)]};
                 // Insert the row
                 let insert_result = handler.insert_row(row.clone());
+                handler.insert_row(other_row.clone());
                 assert!(insert_result.is_ok());
                 // Select the row
                 let predicate = Predicate {
@@ -1372,17 +1434,20 @@ pub mod table_management {
                     operator: Operator::Equals,
                     value: Value::new_number(30),
                 };
-                println!("before: {}", handler);
+                let other_predicate = Predicate {
+                    column: "Age".to_string(),
+                    operator: Operator::Equals,
+                    value: Value::new_number(10),
+                };
                 handler.delete_row(predicate.clone()).unwrap();
-                println!("after: {}", handler);
-                let select_result = handler.select_row(predicate);
+                let select_result = handler.select_row(other_predicate);
                 assert!(select_result.is_ok());
                 let cursor_option = select_result.unwrap();
                 assert!(cursor_option.is_some());
                 let cursor = cursor_option.unwrap();
                 assert_eq!(cursor.value.cols.len(), row.cols.len());
-                assert_eq!(cursor.value.cols[0].to_string(), row.cols[0].to_string());
-                assert_eq!(cursor.value.cols[1].to_string(), row.cols[1].to_string());
+                assert_eq!(cursor.value.cols[0].to_string(), other_row.cols[0].to_string());
+                assert_eq!(cursor.value.cols[1].to_string(), other_row.cols[1].to_string());
             }
 
 
