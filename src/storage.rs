@@ -17,6 +17,7 @@ pub mod file_management {
 
 
     ///Returns the directory tests files should be stored in
+    #[cfg(test)]
     pub fn get_test_path() -> Result<PathBuf> {
         return Ok(get_base_path()?.join("test"));
     }
@@ -656,9 +657,6 @@ pub mod page_management {
             }
 
 
-            //+--
-            //|
-
 
             fn alloc_page(&self) -> Result<PageHeader> {
                 let mut current_header_page_id : usize = 0;
@@ -1080,7 +1078,7 @@ pub mod table_management {
             col_types : Vec<Type>,
             col_names : Vec<String>,
         }
-
+ 
 
         //+--------------+--------------+-----+------------------------+------------+------------+-----+----------------------+
         //| col_offset_1 | col_offset_2 | ... | col_offset_(col_count) | col_data_1 | col_data_2 | ... | col_data_(col_count) |
