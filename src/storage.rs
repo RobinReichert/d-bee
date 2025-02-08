@@ -947,7 +947,8 @@ pub mod table_management {
 
 #[derive(Clone)]
     pub enum Operator {
-        Equals,
+        Equal,
+        NotEqual,
         Less,
         LessOrEqual,
         Bigger,
@@ -1148,8 +1149,10 @@ pub mod table_management {
                 if let Some(index) = col_index {
                     if let Some(value) = row.cols.get(index) {
                         let comparison_result = match (&predicate.operator, value, &predicate.value) {
-                            (Operator::Equals, Value::Text(a), Value::Text(b)) => a == b,
-                            (Operator::Equals, Value::Number(a), Value::Number(b)) => a == b,
+                            (Operator::Equal, Value::Text(a), Value::Text(b)) => a == b,
+                            (Operator::Equal, Value::Number(a), Value::Number(b)) => a == b,
+                            (Operator::NotEqual, Value::Text(a), Value::Text(b)) => a != b,
+                            (Operator::NotEqual, Value::Number(a), Value::Number(b)) => a != b,
                             (Operator::Less, Value::Text(a), Value::Text(b)) => a < b,
                             (Operator::Less, Value::Number(a), Value::Number(b)) => a < b,
                             (Operator::LessOrEqual, Value::Text(a), Value::Text(b)) => a <= b,
@@ -1438,12 +1441,12 @@ pub mod table_management {
                 // Select the row
                 let predicate = Predicate {
                     column: "Age".to_string(),
-                    operator: Operator::Equals,
+                    operator: Operator::Equal,
                     value: Value::new_number(30),
                 };
                 let other_predicate = Predicate {
                     column: "Age".to_string(),
-                    operator: Operator::Equals,
+                    operator: Operator::Equal,
                     value: Value::new_number(10),
                 };
                 handler.delete_row(predicate.clone()).unwrap();
