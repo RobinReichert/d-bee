@@ -897,6 +897,8 @@ pub mod table_management {
 
     pub trait TableHandler {
 
+        fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
+
         ///Takes a row object and inserts it into the table this handler is working on. This
         ///method may return errors!
         fn insert_row(&self, row : Row) -> Result<()>;
@@ -922,7 +924,7 @@ pub mod table_management {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
     pub enum Type {
         Text,
         Number,
@@ -932,15 +934,15 @@ pub mod table_management {
 
 #[derive(Clone)]
     pub enum Value {
-        Text(Vec<u8>),
-        Number(Vec<u8>),
+        Text(String),
+        Number(u64),
     }
 
 
 
 #[derive(Clone)]
     pub struct Row {
-        cols : Vec<Value>,
+        pub cols : Vec<Value>,
     }
 
 
@@ -959,9 +961,9 @@ pub mod table_management {
 
 #[derive(Clone)]
     pub struct Predicate {
-        column : String,
-        operator : Operator,
-        value : Value,
+        pub column : String,
+        pub operator : Operator,
+        pub value : Value,
     }
 
 
@@ -974,6 +976,39 @@ pub mod table_management {
         predicate : Predicate,
     }
 
+
+
+    impl TryFrom<u64> for Type {
+
+
+        type Error = std::io::Error;
+
+
+        fn try_from(value: u64) -> std::result::Result<Self, Self::Error> {
+            Ok(match value {
+                0 => Self::Number,
+                1 => Self::Text,
+                x => return Err(Error::new(ErrorKind::InvalidInput, format!("{} does not represent a type", x))),
+            })
+        }
+
+
+    }
+
+
+
+    impl Into<u64> for Type {
+
+
+        fn into(self) -> u64 {
+            match self {
+                Type::Number => 0,
+                Type::Text => 1,
+            }
+        }
+
+
+    }
 
 
     #[cfg(test)]
@@ -996,13 +1031,23 @@ pub mod table_management {
     impl Value {
 
 
-        fn new_text(value : String) -> Self {
-            return Self::Text(value.as_bytes().to_vec());
+        pub fn new_text(value : String) -> Self {
+            return Self::Text(value);
         }
 
 
-        fn new_number(value : usize) -> Self {
-            return Self::Number(value.to_le_bytes().to_vec());
+        pub fn new_number(value : u64) -> Self {
+            return Self::Number(value);
+        }
+
+
+        pub fn new_text_from_bytes(value : Vec<u8>) -> Result<Self> {
+            return Ok(Self::Text(String::from_utf8(value).map_err(|_| Error::new(ErrorKind::InvalidInput, "couldnt convert bytes to string"))?));
+        }
+        
+
+        pub fn new_number_from_bytes(value : Vec<u8>) -> Result<Self> {
+            return Ok(Self::Number(u64::from_le_bytes(value.try_into().map_err(|_| Error::new(ErrorKind::InvalidInput, "couldnt convert bytes to string"))?)));
         }
 
 
@@ -1015,8 +1060,8 @@ pub mod table_management {
 
         fn into(self) -> Vec<u8> {
             match self { 
-                Self::Text(val) => {val},
-                Self::Number(val) => {val},
+                Self::Text(val) => {val.as_bytes().to_vec()},
+                Self::Number(val) => {val.to_le_bytes().to_vec()},
             }
         }
 
@@ -1031,17 +1076,8 @@ pub mod table_management {
 
         fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             match self { 
-                Self::Text(val) => write!(f, "{}", String::from_utf8(val.to_vec()).unwrap()),
-                Self::Number(val) => {
-                    if val.len() == std::mem::size_of::<usize>() {
-                        let array: [u8; std::mem::size_of::<usize>()] = match val[..].try_into() {
-                            Ok(array) => array,
-                            Err(_) => return write!(f, "[Invalid Number]"),
-                        };
-                        return write!(f, "{}", usize::from_le_bytes(array));
-                    }
-                    return write!(f, "invalid number");
-                },
+                Self::Text(val) => write!(f, "{}", val),
+                Self::Number(val) => write!(f, "{}", val),
             }
         }
 
@@ -1076,8 +1112,7 @@ pub mod table_management {
 
         pub struct SimpleTableHandler {
             page_handler : Box<dyn PageHandler>,
-            col_types : Vec<Type>,
-            col_names : Vec<String>,
+            col_data : Vec<(Type, String)>,
         }
  
 
@@ -1124,8 +1159,8 @@ pub mod table_management {
                 let col_offset = OffsetType::from_le_bytes(bytes[(index * offset_size)..((index + 1) * offset_size)].try_into().map_err(|_|{Error::new(ErrorKind::UnexpectedEof, "not enough bytes for col_offset")})?) as usize;
                 let col_bytes : Vec<u8> = bytes[last_col_offset..col_offset].into();
                 let val : Value = match col {
-                    Type::Number => Value::Number(col_bytes),
-                    Type::Text => Value::Text(col_bytes),
+                    Type::Number => Value::new_number_from_bytes(col_bytes)?,
+                    Type::Text => Value::new_text_from_bytes(col_bytes)?,
                 };
                 row.cols.push(val);
                 last_col_offset = col_offset as usize;
@@ -1138,14 +1173,15 @@ pub mod table_management {
         impl SimpleTableHandler {
 
 
-            fn new(table_path : PathBuf, col_types : Vec<Type>, col_names : Vec<String>) -> Result<SimpleTableHandler> {
+           pub fn new(table_path : PathBuf, cols : Vec<(Type, &str)>) -> Result<SimpleTableHandler> {
+                let col_data : Vec<(Type, String)> = cols.into_iter().map(|(t, n)| (t,n.to_string())).collect();
                 let page_handler = Box::new(SimplePageHandler::new(table_path)?);
-                return Ok(SimpleTableHandler {page_handler, col_types, col_names});
+                return Ok(SimpleTableHandler {page_handler, col_data});
             }
 
 
             fn row_fulfills(&self, row: &Row, predicate : &Predicate) -> Result<bool> {
-                let col_index = self.col_names.iter().position(|name| name == &predicate.column);
+                let col_index = self.col_data.iter().position(|(t, name)| name == &predicate.column);
                 if let Some(index) = col_index {
                     if let Some(value) = row.cols.get(index) {
                         let comparison_result = match (&predicate.operator, value, &predicate.value) {
@@ -1184,7 +1220,7 @@ pub mod table_management {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
                 let mut cursor = self.select_row(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)}).unwrap().unwrap();
                 let mut bubble = Bubble::new(vec![40, 20]);
-                bubble.add_line(self.col_names.clone());
+                bubble.add_line(self.col_data.iter().map(|x| x.1.clone()).collect());
                 bubble.add_divider();
                 let mut i = 0;
                 loop {
@@ -1213,6 +1249,17 @@ pub mod table_management {
 
 
         impl TableHandler for SimpleTableHandler {
+
+
+            fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value> {
+                let col_index = self.col_data.iter().position(|(t, name)| name == col_name);
+                if let Some(index) = col_index {
+                    if let Some(value) = row.cols.get(index) {
+                        return Ok(value.clone());
+                    }
+                }
+                return Err(Error::new(ErrorKind::InvalidInput, "col with this name was not found in row"));
+            }
 
 
             fn insert_row(&self, row : Row) -> Result<()> {
@@ -1245,7 +1292,7 @@ pub mod table_management {
 
 
             fn delete_row(&self, predicate : Predicate) -> Result<()> {
-                let col_types = self.col_types.clone();
+                let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
                     let mut new_used = header.used;
                     let ptr_size = (OffsetType::BITS / 8) as usize;
@@ -1303,7 +1350,7 @@ pub mod table_management {
 
 
             fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
-                let col_types = self.col_types.clone();
+                let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let mut cursor : Option<Cursor> = None;
                 let callback = |header : PageHeader, page : Vec<u8>| -> Result<bool> {
                     let ptr_size = (OffsetType::BITS / 8) as usize;
@@ -1332,7 +1379,7 @@ pub mod table_management {
 
 
             fn next(&self, cursor : &mut Cursor) -> Result<bool> {
-                let col_types = self.col_types.clone();
+                let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let mut found_next = false;
                 let mut initial_ptr_index = cursor.ptr_index;
                 let mut initial_last_data_offset = cursor.data_offset;
@@ -1410,21 +1457,18 @@ pub mod table_management {
             fn simple_table_handler_creation_test() {
                 let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_creation.test");
                 file_management::delete_file(&table_path);
-                let col_types = vec![Type::Text, Type::Number];
-                let col_names = vec!["Name".to_string(), "Age".to_string()];
-                let handler_result = simple::SimpleTableHandler::new(table_path, col_types, col_names);
+                let col_data : Vec<(Type, &str)> = vec![(Type::Text, "Name"), (Type::Number, "Age")];
+                let handler_result = simple::SimpleTableHandler::new(table_path, col_data);
                 assert!(handler_result.is_ok());
             }
 
 
-
-            #[test]
+#[test]
             fn test_simple_table_handler_insert_and_select() {
                 let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_insert_and_select.test");
                 file_management::delete_file(&table_path);
-                let col_types = vec![Type::Text, Type::Number];
-                let col_names = vec!["Name".to_string(), "Age".to_string()];
-                let handler = simple::SimpleTableHandler::new(table_path, col_types.clone(), col_names).unwrap();
+                let col_data : Vec<(Type, &str)> = vec![(Type::Text, "Name"), (Type::Number, "Age")];
+                let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
                 let row = Row {
                     cols: vec![
                         Value::new_text("Alice".to_string()),
