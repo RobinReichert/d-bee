@@ -19,7 +19,11 @@ pub mod file_management {
     ///Returns the directory tests files should be stored in
     #[cfg(test)]
     pub fn get_test_path() -> Result<PathBuf> {
-        return Ok(get_base_path()?.join("test"));
+        let path = get_base_path()?.join("test");
+        if !path.is_dir() {
+            create_dir_all(path.clone());
+        }
+        return Ok(path);
     }
 
 

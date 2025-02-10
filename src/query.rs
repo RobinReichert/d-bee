@@ -344,8 +344,9 @@ pub mod schema_management {
 
 
         pub fn new(db_path: &PathBuf) -> Result<SchemaHandler> {
+            let path = db_path.join("schema.hive");
             let col_data : Vec<(Type, &str)> = vec![(Type::Text, "table_id"), (Type::Text, "col_name"), (Type::Number, "col_type"), (Type::Number, "col_id")];
-            let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(db_path.join("schema.hive"), col_data)?);
+            let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
             return Ok(SchemaHandler{table_handler});
         }
 
@@ -394,12 +395,13 @@ pub mod schema_management {
 
 
         use super::*;
-        use crate::storage::file_management::{get_test_path, delete_dir};
+        use crate::storage::file_management::{get_test_path, delete_file};
 
 
 #[test]
         fn test_schema_handler_creation() {
             let db_path = get_test_path().unwrap();
+            delete_file(&db_path.join("schema.hive"));
             let schema_handler = SchemaHandler::new(&db_path);
             assert!(schema_handler.is_ok(), "SchemaHandler should be created successfully");
         }
@@ -407,8 +409,8 @@ pub mod schema_management {
 #[test]
         fn test_add_and_get_col_data() {
             let db_path = get_test_path().unwrap();
+            delete_file(&db_path.join("schema.hive"));
             let schema_handler = SchemaHandler::new(&db_path).unwrap();
-
             let table_name = "test_table".to_string();
             let col_data = vec![(Type::Text, "name".to_string()), (Type::Number, "age".to_string())];
 
@@ -424,6 +426,7 @@ pub mod schema_management {
 #[test]
         fn test_get_col_data_empty() {
             let db_path = get_test_path().unwrap();
+            delete_file(&db_path.join("schema.hive"));
             let schema_handler = SchemaHandler::new(&db_path).unwrap();
 
             let table_name = "non_existent_table".to_string();
