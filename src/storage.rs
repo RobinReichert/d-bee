@@ -305,12 +305,8 @@ pub mod page_management {
 
 
 
-#[cfg(test)]
-    pub trait TestPageHandler : Display + PageHandler {}
 
-
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
     pub struct  PageHeader {
 
         ///Used to calculate the page start
@@ -624,11 +620,6 @@ pub mod page_management {
 
 
 
-#[cfg(test)]
-        impl TestPageHandler for SimplePageHandler {}
-
-
-
         impl PageHandler for SimplePageHandler {
             
 
@@ -903,6 +894,10 @@ pub mod table_management {
 
         fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
 
+        fn cols_to_row(&self, cols : Vec<(String, String)>) -> Result<Row>;
+
+        fn create_value(&self, col_name : String, value : String) -> Result<Value>;
+
         ///Takes a row object and inserts it into the table this handler is working on. This
         ///method may return errors!
         fn insert_row(&self, row : Row) -> Result<()>;
@@ -910,11 +905,11 @@ pub mod table_management {
         ///This method takes a predicate and returns a cursor which holds one value to a row and a
         ///reference to the next cursor which fulfill the predicates claims. In case no row does so
         ///None is returned. Errors may be returned!
-        fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>>;
+        fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<Cursor>>;
 
         ///This method takes a predicate and removes all rows that fulfill the predicates claims
         ///from the table this handler works in. May fail and return an error!
-        fn delete_row(&self, predicate : Predicate) -> Result<()>;
+        fn delete_row(&self, predicate : Option<Predicate>) -> Result<()>;
 
         ///Takes a cursor and updates it to point at the next row. If a next row was found this
         ///method returns true. Otherwise false is returned. Errors may be thrown!!
@@ -936,7 +931,7 @@ pub mod table_management {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
     pub enum Value {
         Text(String),
         Number(u64),
@@ -944,14 +939,14 @@ pub mod table_management {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
     pub struct Row {
         pub cols : Vec<Value>,
     }
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
     pub enum Operator {
         Equal,
         NotEqual,
@@ -963,7 +958,7 @@ pub mod table_management {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
     pub struct Predicate {
         pub column : String,
         pub operator : Operator,
@@ -971,13 +966,13 @@ pub mod table_management {
     }
 
 
-
+#[derive(Debug)]
     pub struct Cursor {
         pub value : Row,
         header : PageHeader,
         ptr_index : usize,
         data_offset : usize,
-        predicate : Predicate,
+        predicate : Option<Predicate>,
     }
 
 
@@ -992,6 +987,25 @@ pub mod table_management {
             Ok(match value {
                 0 => Self::Number,
                 1 => Self::Text,
+                x => return Err(Error::new(ErrorKind::InvalidInput, format!("{} does not represent a type", x))),
+            })
+        }
+
+
+    }
+
+
+
+    impl TryFrom<String> for Type {
+
+
+        type Error = std::io::Error;
+
+
+        fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+            Ok(match value.as_str() {
+                "text" => Self::Text, 
+                "number" => Self::Number,
                 x => return Err(Error::new(ErrorKind::InvalidInput, format!("{} does not represent a type", x))),
             })
         }
@@ -1090,6 +1104,28 @@ pub mod table_management {
 
 
 
+   impl TryFrom<String> for Operator {
+
+        type Error = std::io::Error;
+
+
+        fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+            Ok(match value.as_str() {
+                "equal" => Self::Equal, 
+                "not_equal" => Self::NotEqual,
+                "less" => Self::Less,
+                "less_equal" => Self::LessOrEqual,
+                "bigger" => Self::Bigger,
+                "bigger_equal" => Self::BiggerOrEqual,
+                x => return Err(Error::new(ErrorKind::InvalidInput, format!("{} does not represent a operator", x))),
+            })
+        }
+
+
+   }
+
+
+
     pub mod simple {
 
   
@@ -1177,40 +1213,42 @@ pub mod table_management {
         impl SimpleTableHandler {
 
 
-           pub fn new(table_path : PathBuf, cols : Vec<(Type, &str)>) -> Result<SimpleTableHandler> {
-                let col_data : Vec<(Type, String)> = cols.into_iter().map(|(t, n)| (t,n.to_string())).collect();
+           pub fn new(table_path : PathBuf, col_data: Vec<(Type, String)>) -> Result<SimpleTableHandler> {
                 let page_handler = Box::new(SimplePageHandler::new(table_path)?);
                 return Ok(SimpleTableHandler {page_handler, col_data});
             }
 
 
-            fn row_fulfills(&self, row: &Row, predicate : &Predicate) -> Result<bool> {
-                let col_index = self.col_data.iter().position(|(t, name)| name == &predicate.column);
-                if let Some(index) = col_index {
-                    if let Some(value) = row.cols.get(index) {
-                        let comparison_result = match (&predicate.operator, value, &predicate.value) {
-                            (Operator::Equal, Value::Text(a), Value::Text(b)) => a == b,
-                            (Operator::Equal, Value::Number(a), Value::Number(b)) => a == b,
-                            (Operator::NotEqual, Value::Text(a), Value::Text(b)) => a != b,
-                            (Operator::NotEqual, Value::Number(a), Value::Number(b)) => a != b,
-                            (Operator::Less, Value::Text(a), Value::Text(b)) => a < b,
-                            (Operator::Less, Value::Number(a), Value::Number(b)) => a < b,
-                            (Operator::LessOrEqual, Value::Text(a), Value::Text(b)) => a <= b,
-                            (Operator::LessOrEqual, Value::Number(a), Value::Number(b)) => a <= b,
-                            (Operator::Bigger, Value::Text(a), Value::Text(b)) => a > b,
-                            (Operator::Bigger, Value::Number(a), Value::Number(b)) => a > b,
-                            (Operator::BiggerOrEqual, Value::Text(a), Value::Text(b)) => a >= b,
-                            (Operator::BiggerOrEqual, Value::Number(a), Value::Number(b)) => a >= b,
-                            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Type mismatch in comparison")),
-                        };
-                        return Ok(comparison_result);
-                    } else {
-                        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column index out of bounds"));
-                    }
-                } else {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column name not found in row"));
-                }
-            }
+           fn row_fulfills(&self, row: &Row, p: &Option<Predicate>) -> Result<bool> {
+               if let Some(predicate) = p {
+                   let col_index = self.col_data.iter().position(|(t, name)| name == &predicate.column);
+                   if let Some(index) = col_index {
+                       if let Some(value) = row.cols.get(index) {
+                           let comparison_result = match (&predicate.operator, value, &predicate.value) {
+                               (Operator::Equal, Value::Text(a), Value::Text(b)) => a == b,
+                               (Operator::Equal, Value::Number(a), Value::Number(b)) => a == b,
+                               (Operator::NotEqual, Value::Text(a), Value::Text(b)) => a != b,
+                               (Operator::NotEqual, Value::Number(a), Value::Number(b)) => a != b,
+                               (Operator::Less, Value::Text(a), Value::Text(b)) => a < b,
+                               (Operator::Less, Value::Number(a), Value::Number(b)) => a < b,
+                               (Operator::LessOrEqual, Value::Text(a), Value::Text(b)) => a <= b,
+                               (Operator::LessOrEqual, Value::Number(a), Value::Number(b)) => a <= b,
+                               (Operator::Bigger, Value::Text(a), Value::Text(b)) => a > b,
+                               (Operator::Bigger, Value::Number(a), Value::Number(b)) => a > b,
+                               (Operator::BiggerOrEqual, Value::Text(a), Value::Text(b)) => a >= b,
+                               (Operator::BiggerOrEqual, Value::Number(a), Value::Number(b)) => a >= b,
+                               _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "Type mismatch in comparison")),
+                           };
+                           return Ok(comparison_result);
+                       } else {
+                           return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column index out of bounds"));
+                       }
+                   } else {
+                       return Err(io::Error::new(io::ErrorKind::InvalidInput, "Column name not found in row"));
+                   }
+               }
+               return Ok(true);
+           }
 
 
         }
@@ -1222,7 +1260,7 @@ pub mod table_management {
 
 
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let mut cursor = self.select_row(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)}).unwrap().unwrap();
+                let mut cursor = self.select_row(Some(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)})).unwrap().unwrap();
                 let mut bubble = Bubble::new(vec![40, 20]);
                 bubble.add_line(self.col_data.iter().map(|x| x.1.clone()).collect());
                 bubble.add_divider();
@@ -1266,6 +1304,35 @@ pub mod table_management {
             }
 
 
+            fn cols_to_row(&self, mut cols : Vec<(String, String)>) -> Result<Row> {
+                cols.sort_by_key(|(n, _)| self.col_data.iter().position(|(_, s)| s==n));
+                let mut res : Vec<Value> = vec![];
+                for (index, (name, value)) in cols.iter().enumerate() {
+                    let col : Result<Value> = match self.col_data[index].0 {
+                        Type::Text => Ok(Value::new_text(value.clone())),
+                        Type::Number => {
+                            let number_value : u64 = value.parse().map_err(|_| Error::new(ErrorKind::InvalidInput, "could not convert string to int"))?;
+                            Ok(Value::new_number(number_value))
+                        },
+                    };
+                    res.push(col?);
+                }
+                return Ok(Row{cols: res});
+            }
+
+
+            fn create_value(&self, col_name : String, value : String) -> Result<Value> {
+                let col = self.col_data.iter().find(|(_, n)| *n == col_name).ok_or_else(|| Error::new(ErrorKind::InvalidInput, "col is not present in table"))?;
+                Ok(match col.0 {
+                    Type::Text => Value::new_text(value),
+                    Type::Number => {
+                        let number_value : u64 = value.parse().map_err(|_| Error::new(ErrorKind::InvalidInput, "could not convert string to int"))?;
+                        Value::new_number(number_value)
+                    },
+                })
+            }
+
+
             fn insert_row(&self, row : Row) -> Result<()> {
                 let mut row_bytes : Vec<u8> = row.into();
                 let row_size = row_bytes.len();
@@ -1295,7 +1362,7 @@ pub mod table_management {
 
 
 
-            fn delete_row(&self, predicate : Predicate) -> Result<()> {
+            fn delete_row(&self, predicate : Option<Predicate>) -> Result<()> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
                     let mut new_used = header.used;
@@ -1353,7 +1420,7 @@ pub mod table_management {
 
 
 
-            fn select_row(&self, predicate : Predicate) -> Result<Option<Cursor>> {
+            fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<Cursor>> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let mut cursor : Option<Cursor> = None;
                 let callback = |header : PageHeader, page : Vec<u8>| -> Result<bool> {
@@ -1461,7 +1528,7 @@ pub mod table_management {
             fn simple_table_handler_creation_test() {
                 let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_creation.test");
                 file_management::delete_file(&table_path);
-                let col_data : Vec<(Type, &str)> = vec![(Type::Text, "Name"), (Type::Number, "Age")];
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string())];
                 let handler_result = simple::SimpleTableHandler::new(table_path, col_data);
                 assert!(handler_result.is_ok());
             }
@@ -1471,7 +1538,7 @@ pub mod table_management {
             fn test_simple_table_handler_insert_and_select() {
                 let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_insert_and_select.test");
                 file_management::delete_file(&table_path);
-                let col_data : Vec<(Type, &str)> = vec![(Type::Text, "Name"), (Type::Number, "Age")];
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string())];
                 let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
                 let row = Row {
                     cols: vec![
@@ -1497,8 +1564,8 @@ pub mod table_management {
                     operator: Operator::Equal,
                     value: Value::new_number(10),
                 };
-                handler.delete_row(predicate.clone()).unwrap();
-                let select_result = handler.select_row(other_predicate);
+                handler.delete_row(Some(predicate.clone())).unwrap();
+                let select_result = handler.select_row(Some(other_predicate));
                 assert!(select_result.is_ok());
                 let cursor_option = select_result.unwrap();
                 assert!(cursor_option.is_some());

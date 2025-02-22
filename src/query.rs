@@ -1,9 +1,10 @@
 #![allow(unused)]
 
-pub mod parser {
+pub mod parsing {
 
 
 
+    use crate::storage::table_management::Type;
     use std::{io::{Result, ErrorKind, Error}, collections::hash_map::HashMap};
     use regex::Regex;
 
@@ -20,7 +21,7 @@ pub mod parser {
         #[derive(Clone, Debug)]
         pub enum Symbol {
             Terminal(String),
-            NamedTerminal(String, String),
+            Wrapper(Box<Symbol>, String, String),
             Value(String),
             Option(Vec<Symbol>),
             Repeat(Box<Symbol>),
@@ -35,8 +36,8 @@ pub mod parser {
 
 
 
-        pub fn nt(val: &str, name: &str) -> Symbol {
-            return NamedTerminal(val.to_string(), name.to_string());
+        pub fn w(s: Symbol, key: &str, val: &str) -> Symbol {
+            return Wrapper(Box::new(s), key.to_string(), val.to_string());
         }
 
 
@@ -88,20 +89,15 @@ pub mod parser {
                     }
                     return Err((Error::new(ErrorKind::InvalidInput, format!("did not extpect {}, you may want to use {}", val, exp)), input.len()));
                 },
-                NamedTerminal(exp, id) => {
-                    let val = String::from(input.pop().ok_or_else(|| {
-                        (Error::new(ErrorKind::InvalidInput, "input was too short"), input.len())
-                    })?);
-                    if exp == val {
-                        let mut res = solve(stack, input)?;
-                        if let Some(mut existing) = res.insert(id.clone(), vec![exp.clone()]) {
-                            res.remove(&id); 
-                            existing.push(exp);
-                            res.insert(id, existing);
-                        }
-                        return Ok(res);
+                Wrapper(symbol, key, val) => {
+                    stack.push(*symbol);
+                    let mut res = solve(stack, input)?;
+                    if let Some(mut existing) = res.insert(key.clone(), vec![val.clone()]) {
+                        res.remove(&key); 
+                        existing.push(val);
+                        res.insert(key, existing);
                     }
-                    return Err((Error::new(ErrorKind::InvalidInput, format!("did not extpect {}, you may want to use {}", val, exp)), input.len()));
+                    return Ok(res);
                 }
                 Value(id) => {
                     let val = input.pop().ok_or_else(||{
@@ -153,6 +149,30 @@ pub mod parser {
     }
 
 
+    pub const COMMAND_KEY : &str = "command";
+    pub const CREATE : &str = "create";
+    pub const DROP : &str = "drop";
+    pub const INSERT : &str = "insert";
+    pub const SELECT : &str = "select";
+    pub const DELETE : &str = "delete";
+    pub const TABLE_NAME_KEY : &str = "table_name";
+    pub const COLUMN_NAME_KEY : &str = "column_name";
+    pub const COLUMN_TYPE_KEY : &str = "column_type";
+    pub const COLUMN_VALUE_KEY : &str = "column_value";
+    pub const NUMBER : &str = "number";
+    pub const TEXT : &str = "text";
+    pub const OPERATOR_KEY : &str = "operator";
+    pub const EQUAL : &str = "equal";
+    pub const NOT_EQUAL : &str = "not_equal";
+    pub const SMALLER : &str = "smaller";
+    pub const SMALLER_EQUAL : &str = "smaller_equal";
+    pub const BIGGER : &str = "bigger";
+    pub const BIGGER_EQUAL : &str = "bigger_equal";
+    pub const PREDICATE_COL : &str = "predicate_col";
+    pub const PREDICATE_VAL : &str = "predicate_val";
+
+
+
 
     use bnf::*;
 
@@ -160,7 +180,7 @@ pub mod parser {
 
     #[derive(Debug, Clone)]
     pub struct Query {
-        plan: HashMap<String, Vec<String>>
+        pub plan: HashMap<String, Vec<String>>
     }
 
 
@@ -169,17 +189,45 @@ pub mod parser {
 
 
         pub fn from(q: String) -> std::io::Result<Query> {
-            let col_names : Symbol = o(vec![s(vec![]), v("column"), s(vec![r(s(vec![v("column"), t(",")])), v("column")])]);
-            let col_values : Symbol = o(vec![s(vec![]), v("value"), s(vec![r(s(vec![v("value"), t(",")])), v("value")])]);
+            let data_type : Symbol = o(vec![w(t("text"), COLUMN_TYPE_KEY, TEXT), w(t("number"), COLUMN_TYPE_KEY, NUMBER)]);
+
+            let col_data : Symbol = o(vec![
+                s(vec![v(COLUMN_NAME_KEY), data_type.clone()]), 
+                s(vec![r(
+                        s(vec![v(COLUMN_NAME_KEY), data_type.clone(), t(",")])),
+                        s(vec![v(COLUMN_NAME_KEY), data_type])])]);
+
+            let create_table : Symbol = w(s(vec![t("create"), t("table"), v(TABLE_NAME_KEY), t("("), col_data, t(")")]), COMMAND_KEY, CREATE);
+
+            let drop_table : Symbol = w(s(vec![t("drop"), t("table"), v(TABLE_NAME_KEY)]), COMMAND_KEY, DROP);
+
+            let col_names : Symbol = o(vec![s(vec![]), v(COLUMN_NAME_KEY), s(vec![r(s(vec![v(COLUMN_NAME_KEY), t(",")])), v(COLUMN_NAME_KEY)])]);
+
+            let col_values : Symbol = o(vec![s(vec![]), v(COLUMN_VALUE_KEY), s(vec![r(s(vec![v(COLUMN_VALUE_KEY), t(",")])), v(COLUMN_VALUE_KEY)])]);
+
             let insert_values : Symbol = o(vec![s(vec![t("("), col_names.clone(), t(")"), t("values"), t("("), col_values.clone(), t(")")]), s(vec![t("values"), t("("), col_values.clone(), t(")")])]);
-            let insert : Symbol = s(vec![nt("insert", "command"), t("into"), v("table"), insert_values]);
-            let operator : Symbol = o(vec![nt("==", "operator"),nt("!=", "operator"), nt("<", "operator"), nt("<=", "operator"), nt(">", "operator"), nt(">=", "operator")]);
-            let predicate : Symbol = o(vec![s(vec![]), s(vec![t("where"), v("predicate_column_name"), operator.clone(), v("predicate_value")])]);
-            let columns : Symbol = o(vec![t("*"), v("column"), s(vec![r(s(vec![v("column"), t(",")])), v("column")])]);
-            let select : Symbol = s(vec![nt("select", "command"), columns, t("from"), v("table"), predicate.clone()]);
-            let delete : Symbol = s(vec![nt("delete", "command"), t("from"), v("table"), predicate.clone()]); 
-            let query : Symbol = s(vec![o(vec![insert, select, delete]), t(";")]);
-            let regex = Regex::new(r"\w+|[();,*]|(>=)|>|(==)|!=|<|(<=)").unwrap();
+
+            let insert : Symbol = w(s(vec![t("insert"), t("into"), v(TABLE_NAME_KEY), insert_values]), COMMAND_KEY, INSERT);
+
+            let operator : Symbol = o(vec![
+                w(t("=="), OPERATOR_KEY, EQUAL), 
+                w(t("!="), OPERATOR_KEY, NOT_EQUAL), 
+                w(t("<"), OPERATOR_KEY, SMALLER), 
+                w(t("<="), OPERATOR_KEY, SMALLER_EQUAL), 
+                w(t(">"), OPERATOR_KEY, BIGGER), 
+                w(t(">="), OPERATOR_KEY, BIGGER_EQUAL)]);
+
+            let predicate : Symbol = o(vec![s(vec![]), s(vec![t("where"), v(PREDICATE_COL), operator.clone(), v(PREDICATE_VAL)])]);
+
+            let columns : Symbol = o(vec![t("*"), v(COLUMN_NAME_KEY), s(vec![r(s(vec![v(COLUMN_NAME_KEY), t(",")])), v(COLUMN_NAME_KEY)])]);
+
+            let select : Symbol = w(s(vec![t("select"), columns, t("from"), v(TABLE_NAME_KEY), predicate.clone()]), COMMAND_KEY, SELECT);
+
+            let delete : Symbol = w(s(vec![t("delete"), t("from"), v(TABLE_NAME_KEY), predicate.clone()]), COMMAND_KEY, DELETE);
+
+            let query : Symbol = s(vec![o(vec![create_table, drop_table, insert, select, delete]), t(";")]);
+
+            let regex = Regex::new(r"\w+|[();,*]|>=|>|==|!=|<|<=").unwrap();
             let mut input : Vec<String> = regex.find_iter(&q.to_lowercase()).map(|x| {x.as_str()}).map(|x| {x.to_string()}).collect();
             input.reverse();
             let plan = bnf::solve(vec![query], input).map_err(|e|{Error::new(ErrorKind::InvalidInput, e.0.to_string())});
@@ -187,21 +235,6 @@ pub mod parser {
         }
 
 
-        pub fn execute(&self) -> Result<()>{
-            let command = self.plan.get("command").ok_or_else(||{Error::new(ErrorKind::InvalidInput, "query was not valid")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "command was empty")})?;
-            match command.as_str() {
-                "insert" => {
-                    Ok(())
-                },
-                "select" => {
-                    Ok(())
-                },
-                "delete" => {
-                    Ok(())
-                },
-                _ => Err(Error::new(ErrorKind::InvalidInput, "")),
-            }
-        }
 
 
     }
@@ -213,6 +246,13 @@ pub mod parser {
 
 
         use super::*;
+
+
+        #[test]
+        fn test_valid_create_table() {
+            let result = Query::from("CREATE TABLE test (hallo TEXT);".to_string());
+            assert!(result.is_ok(), "Valid create query should not return an error");
+        }
 
 
         #[test]
@@ -240,7 +280,6 @@ pub mod parser {
         fn test_valid_select_without_where() {
             let result = Query::from("SELECT col1, col2 FROM users;".to_string());
             assert!(result.is_ok(), "Valid select query without WHERE clause should not return an error");
-            result.unwrap().execute();
         }
 
 
@@ -326,117 +365,195 @@ pub mod parser {
 
 }
 
-pub mod schema_management {
 
 
-    use std::{io::Result, path::PathBuf, io::{Error, ErrorKind}};
-    use crate::storage::{table_management::{Row, Type, Predicate, Operator, Value, TableHandler, simple::SimpleTableHandler}, file_management::*};
+pub mod execution {
 
 
 
-    pub struct SchemaHandler {
-        table_handler: Box<dyn TableHandler>
+    use super::parsing::*;
+    use crate::{schema::SchemaHandler, storage::{table_management::{Cursor, Operator, Predicate, Row, Type, TableHandler, simple::SimpleTableHandler}, file_management::delete_file}};
+    use std::{io::{Result, Error, ErrorKind}, path::PathBuf, collections::hash_map::HashMap};
+
+
+
+    pub struct Executor {
+        db_path : PathBuf,
+        schema : SchemaHandler,
+        tables : Vec<(String, Box<dyn TableHandler>)>,
     }
 
 
 
-    impl SchemaHandler {
+    impl Executor {
 
 
-        pub fn new(db_path: &PathBuf) -> Result<SchemaHandler> {
-            let path = db_path.join("schema.hive");
-            let col_data : Vec<(Type, &str)> = vec![(Type::Text, "table_id"), (Type::Text, "col_name"), (Type::Number, "col_type"), (Type::Number, "col_id")];
-            let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
-            return Ok(SchemaHandler{table_handler});
+        pub fn new(db_path: PathBuf) -> Result<Self> {
+            let schema : SchemaHandler = SchemaHandler::new(&db_path)?;
+            let mut tables : Vec<(String, Box<dyn TableHandler>)> = vec![];
+            let table_data = schema.get_table_data()?;
+            for table_id in table_data.keys() {
+                tables.push((table_id.clone(), Box::new(SimpleTableHandler::new(db_path.join(table_id), table_data.get(table_id).ok_or_else(|| Error::new(ErrorKind::Other, "unexpected error when creating new Executor"))?.clone())?)));
+            }
+            return Ok(Executor{db_path, schema, tables});
         }
 
 
-        pub fn get_col_data(&self, table : String) -> Result<Vec<(Type, String)>> {
-            let predicate : Predicate = Predicate{column: "table_id".to_string(), operator: Operator::Equal, value: Value::new_text(table) };
-            let res = self.table_handler.select_row(predicate)?;
-            if let Some(mut cursor) = res {
-                let mut col_data : Vec<(u64, String, Type)> = vec![];
-                loop {
-                    let row = cursor.value.clone();
-                    match (
-                        self.table_handler.get_col_from_row(row.clone(), "col_id")?,
-                        self.table_handler.get_col_from_row(row.clone(), "col_name")?,
-                        self.table_handler.get_col_from_row(row.clone(), "col_type")?) {
-                        (Value::Number(col_id), Value::Text(col_name), Value::Number(col_type)) => col_data.push((col_id, col_name, Type::try_from(col_type)?)),
-                        _ => return Err(Error::new(ErrorKind::InvalidInput, "unexpected error cols in schema did not have the right type")),
-                    }
-                    if !self.table_handler.next(&mut cursor)? {
-                        break;
-                    }
-                }
-                col_data.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-                let end_res : Vec<(Type, String)> = col_data.into_iter().map(|(_, n, t)| (t, n)).collect();
-                return Ok(end_res)
+        fn create(&mut self, args : HashMap<String, Vec<String>>) -> Result<()> {
+            let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
+            if self.tables.iter().any(|(t, _)| *t == table_name) {
+                return Err(Error::new(ErrorKind::InvalidInput, "table exists already"));
             }
-            return Ok(vec![]);
-        }
-
-
-        pub fn add_col_data(&self, table : String, data : Vec<(Type, String)>) -> Result<()> {
-            for (idx, d) in data.iter().enumerate() {
-                let row : Row = Row{cols: vec![Value::new_text(table.clone()), Value::new_text(d.1.clone()), Value::new_number(d.0.clone().into()), Value::new_number(idx as u64)]};
-                self.table_handler.insert_row(row)?;
+            let col_types : Vec<String> = args.get(COLUMN_TYPE_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col types")})?.clone();
+            let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col names")})?.clone();
+            if col_types.len() != col_names.len() {
+                return Err(Error::new(ErrorKind::InvalidInput, "args col types and col names had different lengths"));
             }
+            let mut col_data : Vec<(Type, String)> = vec![];
+            for i in 0..col_types.len() {
+                col_data.push((Type::try_from(col_types[i].clone())?, col_names[i].clone()));
+            }
+            let new_table = Box::new(SimpleTableHandler::new(self.db_path.join(table_name.clone()), col_data.clone())?);
+            self.tables.push((table_name.clone(), new_table));
+            self.schema.add_col_data(table_name.clone(), col_data)?;
             return Ok(());
         }
 
 
+        fn drop(&mut self, args : HashMap<String, Vec<String>>) -> Result<()> {
+            let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
+            if !self.tables.iter().any(|(t, _)|*t == table_name) {
+                return Err(Error::new(ErrorKind::InvalidInput, "table does not exists"));
+            }
+            self.schema.remove_table_data(table_name.clone());
+            self.tables.retain(|(t, _)| *t == table_name.clone()); 
+            delete_file(&self.db_path.join(table_name));             
+            return Ok(());
+        }
+
+
+        fn insert(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+            let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
+            let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col names"))?.clone();
+            let col_values : Vec<String> = args.get(COLUMN_VALUE_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.clone();
+            let handler = &self.tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.1;
+            let row = handler.cols_to_row(col_names.into_iter().zip(col_values.into_iter()).collect())?;
+            handler.insert_row(row);
+            return Ok(());
+        }
+
+
+        fn select(&self, args : HashMap<String, Vec<String>>) -> Result<Option<(String, Cursor)>> {
+            let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
+            let col_names : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
+            let handler = &self.tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+            let predicate : Option<Predicate> = match (
+                args.get(PREDICATE_COL),
+                args.get(OPERATOR_KEY),
+                args.get(PREDICATE_VAL),
+            ) {
+                (Some(column), Some(operator), Some(value)) => {
+                    match (
+                        column.first(),
+                        operator.first(),
+                        value.first(),
+                    ){
+                        (Some(column), Some(operator), Some(value)) => {
+                            match (
+                                Operator::try_from(operator.clone()),
+                                handler.create_value(column.clone(), value.clone()),
+                            ) {
+                                (Ok(operator), Ok(value)) => Some(Predicate{column : column.clone(), operator, value}),
+                                _ => None,
+                            }
+                        },
+                        _ => None,
+                    }
+                },
+                _ => None,
+            };
+            Ok(match handler.select_row(predicate)? {
+                Some(c) => Some((table_name, c)), None => None,
+            })
+        }
+
+
+        fn delete(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+            todo!();
+        }
+
+        pub fn next(&self, (table_name, cursor) : &mut (String, Cursor)) -> Result<bool> {
+            let handler = &self.tables.iter().find(|(t, _)| *t==*table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+            handler.next(cursor)
+        }
+
+
+        pub fn execute(&mut self, query: Query) -> Result<Option<(String, Cursor)>>{
+            let command = query.plan.get(COMMAND_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "query was not valid")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "command was empty")})?;
+            Ok(match command.as_str() {
+                CREATE => {
+                    self.create(query.plan.clone())?;
+                    None
+                },
+                DROP => {
+                    self.drop(query.plan.clone())?;
+                    None
+                },
+                INSERT => {
+                    self.insert(query.plan.clone())?;
+                    None
+                },
+                SELECT => {
+                    self.select(query.plan.clone())?
+                },
+                DELETE => {
+                    self.delete(query.plan.clone())?;
+                    None
+                },
+                _ => return Err(Error::new(ErrorKind::InvalidInput, ""))
+
+            })
+        }
+
     }
 
 
-
     #[cfg(test)]
-    mod test {
+    pub mod test {
 
 
         use super::*;
         use crate::storage::file_management::{get_test_path, delete_file};
 
 
-#[test]
-        fn test_schema_handler_creation() {
+        #[test]
+        fn test_valid_create_table() {
+            let q = Query::from("CREATE TABLE test_table (test_col TEXT);".to_string()).unwrap();
+            let q2 = Query::from("DROP TABLE test_table;".to_string()).unwrap();
+            let q3 = Query::from("CREATE TABLE test_table3 (test_col TEXT);".to_string()).unwrap();
+            let q4 = Query::from("INSERT INTO test_table (test_col) VALUES (hallo);".to_string()).unwrap();
+            let q6 = Query::from("INSERT INTO test_table (test_col) VALUES (welt);".to_string()).unwrap();
+            let q5 = Query::from("SELECT * FROM test_table;".to_string()).unwrap();
             let db_path = get_test_path().unwrap();
-            delete_file(&db_path.join("schema.hive"));
-            let schema_handler = SchemaHandler::new(&db_path);
-            assert!(schema_handler.is_ok(), "SchemaHandler should be created successfully");
+            let mut e = Executor::new(db_path).unwrap();
+            e.execute(q).unwrap();
+            e.execute(q3).unwrap();
+            e.execute(q4).unwrap();
+            e.execute(q6).unwrap();
+            let res = e.execute(q5).unwrap();
+            if let Some(mut cursor) = res {
+                loop{
+                    println!("{:?}", cursor.1.value); 
+                    if(!e.next(&mut cursor).unwrap()) {
+                        break;
+                    }
+                }
+            }
+            e.execute(q2).unwrap();
         }
 
-#[test]
-        fn test_add_and_get_col_data() {
-            let db_path = get_test_path().unwrap();
-            delete_file(&db_path.join("schema.hive"));
-            let schema_handler = SchemaHandler::new(&db_path).unwrap();
-            let table_name = "test_table".to_string();
-            let col_data = vec![(Type::Text, "name".to_string()), (Type::Number, "age".to_string())];
-
-            // Add column data
-            let result = schema_handler.add_col_data(table_name.clone(), col_data.clone());
-            assert!(result.is_ok(), "Adding column data should succeed");
-
-            // Retrieve column data
-            let retrieved_data = schema_handler.get_col_data(table_name).unwrap();
-            assert_eq!(retrieved_data, col_data, "Retrieved column data should match inserted data");
-        }
-
-#[test]
-        fn test_get_col_data_empty() {
-            let db_path = get_test_path().unwrap();
-            delete_file(&db_path.join("schema.hive"));
-            let schema_handler = SchemaHandler::new(&db_path).unwrap();
-
-            let table_name = "non_existent_table".to_string();
-            let retrieved_data = schema_handler.get_col_data(table_name);
-            assert!(retrieved_data.is_ok(), "Fetching column data for non-existent table should not fail");
-            assert!(retrieved_data.unwrap().is_empty(), "Retrieved data should be empty");
-        }
 
     }
-
 
 
 
