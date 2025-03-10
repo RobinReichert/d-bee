@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+libc = "0.2"
 regex = "1"
 dirs = "5.0"
 scopeguard = "1.2.0"
+rand = "0.8"
+hex = "0.4"

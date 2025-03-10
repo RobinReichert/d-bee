@@ -4,8 +4,9 @@ pub mod file_management {
 
 
 
-    use std::{fs::{self, create_dir_all, metadata, remove_dir_all, remove_file, File, OpenOptions},  io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write}, path::PathBuf};
+    use std::{sync::{Mutex, Condvar}, collections::HashSet, fs::{self, create_dir_all, metadata, remove_dir_all, remove_file, File, OpenOptions}, os::unix::prelude::*, io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, Write}, path::PathBuf};
     use dirs::home_dir;
+    use libc::{pwrite, pread};
 
 
 
@@ -63,7 +64,7 @@ pub mod file_management {
 
 
 
-    pub trait FileHandler {
+    pub trait FileHandler: Sync + Send {
 
         ///Returns the path this FileHandler works in
         fn get_path(&self) -> &PathBuf;
@@ -80,7 +81,11 @@ pub mod file_management {
 
     pub struct SimpleFileHandler {
 
+        file : File,
+        fd : i32,
         path : PathBuf,
+        cond : Condvar,
+        accesses : Mutex<HashSet<(usize, usize)>>
 
     }
 
@@ -93,7 +98,11 @@ pub mod file_management {
             if !path.is_file() {
                 return Err(Error::new(ErrorKind::NotFound, "the path passed is not a file or does not have right permissions"));
             }
-            return Ok(SimpleFileHandler {path});
+            let file = OpenOptions::new().write(true).read(true).open(&path)?;
+            let fd = file.as_raw_fd();
+            let cond = Condvar::new();
+            let accesses = Mutex::new(HashSet::new());
+            return Ok(SimpleFileHandler {file, fd, path, cond, accesses});
         }
 
 
@@ -110,25 +119,44 @@ pub mod file_management {
 
 
         fn read_at(&self, at : usize, length : usize) -> Result<Vec<u8>> {
-            let mut file = OpenOptions::new().read(true).open(&self.path)?;
-            //Move cursor to start
-            file.seek(SeekFrom::Start(at as u64))?;
-            let mut buffer = vec![0; length];
-            //Catch UnexpectedEof, return all other errors
-            match file.read_exact(&mut buffer) {
-                Ok(()) => Ok(buffer),
-                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => Ok(buffer),
-                Err(e) => Err(e)
+            {
+                let mut accesses = self.accesses.lock().map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+                while accesses.iter().any(|(start, len)| *start < at + length && at < start + len){
+                    accesses = self.cond.wait(accesses).map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+                }
             }
+            let mut buffer = vec![0; length];
+            let res = unsafe {
+                pread(self.fd, buffer.as_mut_ptr() as *mut _, length, at as _)
+            };
+            if res == -1 {
+                return Err(Error::last_os_error());
+            }
+            return Ok(buffer);
         }
 
 
         fn write_at(&self, at : usize, data : Vec<u8>) -> Result<()> {
-            let mut file = OpenOptions::new().write(true).open(&self.path)?;
-            //Move cursor to start
-            file.seek(SeekFrom::Start(at as u64))?;
-            //Write data starting from the cursor
-            return file.write_all(&data);
+            let data_len = data.len();
+            {
+                let mut accesses = self.accesses.lock().map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+                while accesses.iter().any(|(start, length)| *start < at + data_len && at < start + length){
+                    accesses = self.cond.wait(accesses).map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+                }
+                accesses.insert((at, data_len)); 
+            }
+            let res = unsafe {
+                pwrite(self.fd, data.as_ptr() as *const _, data_len, at as _)
+            };
+            {
+                let mut accesses = self.accesses.lock().map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+                accesses.remove(&(at, data_len)); 
+                self.cond.notify_all();
+            }
+            if res == -1 {
+                return Err(Error::last_os_error());
+            }
+            return Ok(());
         }
 
 
@@ -141,6 +169,8 @@ pub mod file_management {
 
 
 
+        use std::sync::{Arc};
+        use std::thread;
         use super::*;
 
 
@@ -228,6 +258,31 @@ pub mod file_management {
         }
 
 
+        #[test]
+        fn parallel_writes_test() {
+            let file_path = get_test_path().unwrap().join("parallel_writes.test");
+            create_file(&file_path).unwrap();
+            let handler: Arc<dyn FileHandler> = Arc::new(SimpleFileHandler::new(file_path.clone()).unwrap());
+            for _ in 0..1000 {
+                let data1 = b"AAAA".to_vec();
+                let data2 = b"BBBB".to_vec();
+                let handler_clone1 = Arc::clone(&handler);
+                let handler_clone2 = Arc::clone(&handler);
+                let thread1 = thread::spawn(move || {
+                    handler_clone1.write_at(0, data1).unwrap();
+                });
+                let thread2 = thread::spawn(move || {
+                    handler_clone2.write_at(2, data2).unwrap();  // Overlaps partially with first write
+                });
+                thread1.join().unwrap();
+                thread2.join().unwrap();
+                let result = handler.read_at(0, 6).unwrap();
+                assert!(result == b"AAAABB" || result == b"AABBBB", "Writes did not synchronize properly!");
+            }
+            delete_file(&file_path).unwrap();
+        }
+
+
 
     }
 
@@ -264,7 +319,7 @@ pub mod page_management {
 
 
 
-    pub trait PageHandler {
+    pub trait PageHandler: Sync + Send {
 
         ///Takes the number of bytes of the data that should be stored in a page. Returns the
         ///header of the first header that can fit the data. If no page is allocated that has
@@ -890,7 +945,7 @@ pub mod table_management {
 
 
 
-    pub trait TableHandler {
+    pub trait TableHandler: Sync + Send {
 
         fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
 
@@ -905,7 +960,7 @@ pub mod table_management {
         ///This method takes a predicate and returns a cursor which holds one value to a row and a
         ///reference to the next cursor which fulfill the predicates claims. In case no row does so
         ///None is returned. Errors may be returned!
-        fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<Cursor>>;
+        fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<(Row, Cursor)>>;
 
         ///This method takes a predicate and removes all rows that fulfill the predicates claims
         ///from the table this handler works in. May fail and return an error!
@@ -913,13 +968,9 @@ pub mod table_management {
 
         ///Takes a cursor and updates it to point at the next row. If a next row was found this
         ///method returns true. Otherwise false is returned. Errors may be thrown!!
-        fn next(&self, cursor : &mut Cursor) -> Result<bool>;
+        fn next(&self, cursor : &mut Cursor) -> Result<Option<Row>>;
 
     }
-
-
-
-    pub trait TestTableHandler : TableHandler + Display {}
 
 
 
@@ -968,7 +1019,6 @@ pub mod table_management {
 
 #[derive(Debug)]
     pub struct Cursor {
-        pub value : Row,
         header : PageHeader,
         ptr_index : usize,
         data_offset : usize,
@@ -1086,6 +1136,22 @@ pub mod table_management {
 
     }
 
+    
+
+    impl Into<Type> for Value {
+
+
+        fn into(self) -> Type {
+            match self {
+                Self::Text(_) => Type::Text,
+                Self::Number(_) => Type::Number,
+                
+            }
+        }
+
+
+    }
+
 
 
 #[cfg(test)]
@@ -1100,6 +1166,16 @@ pub mod table_management {
         }
 
 
+    }
+
+    impl PartialEq for Value {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (Self::Text(v1), Self::Text(v2)) => v1 == v2,
+                (Self::Number(v1), Self::Number(v2)) => v1 == v2,
+                _ => false,
+            }
+        }
     }
 
 
@@ -1189,9 +1265,11 @@ pub mod table_management {
 
         }
 
+        
+        impl TryFrom<(Vec<u8>, Vec<Type>)> for Row {
+            type Error = io::Error;
 
-
-        fn row_from_bytes(bytes : Vec<u8>, col_types : Vec<Type>) -> Result<Row> {
+            fn try_from((bytes, col_types): (Vec<u8>, Vec<Type>)) -> std::result::Result<Self, Self::Error> {
             let offset_size = (OffsetType::BITS / 8) as usize;
             let mut last_col_offset = col_types.len() * offset_size;
             let mut row = Row {cols : Vec::new()};
@@ -1206,6 +1284,9 @@ pub mod table_management {
                 last_col_offset = col_offset as usize;
             }
             return Ok(row);
+        }
+
+
         }
 
 
@@ -1260,22 +1341,21 @@ pub mod table_management {
 
 
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let mut cursor = self.select_row(Some(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)})).unwrap().unwrap();
+                let (mut row, mut cursor) = self.select_row(Some(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)})).unwrap().unwrap();
                 let mut bubble = Bubble::new(vec![40, 20]);
                 bubble.add_line(self.col_data.iter().map(|x| x.1.clone()).collect());
                 bubble.add_divider();
-                let mut i = 0;
                 loop {
                     let mut res : Vec<String> = Vec::new();
-                    for col in cursor.value.cols.clone() {
+                    for col in row.cols.clone() {
                         res.push(col.to_string());
                     }
                     bubble.add_line(res);
-                    if !self.next(&mut cursor).unwrap() {
-                        println!("{}", i);
+                    if let Some(r) = self.next(&mut cursor).unwrap() {
+                        row = r;
+                    }else{
                         break;
                     }
-                    i += 1;
                 }
                 return write!(f,"{}", bubble);
             }
@@ -1283,10 +1363,6 @@ pub mod table_management {
 
         }
 
-
-
-        #[cfg(test)]
-        impl TestTableHandler for SimpleTableHandler {}
 
 
 
@@ -1383,7 +1459,7 @@ pub mod table_management {
                         let data_start : usize = page.len() - data_offset;
                         let data_end : usize = page.len() - previous_data_offset;
                         let row_bytes : Vec<u8> = page[data_start..data_end].into();
-                        let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
+                        let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
                         if self.row_fulfills(&value, &predicate)? {
                             //Shift the data left of the deleted row to the right, just over it
                             let row_size = data_end - data_start;
@@ -1420,9 +1496,9 @@ pub mod table_management {
 
 
 
-            fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<Cursor>> {
+            fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<(Row, Cursor)>> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
-                let mut cursor : Option<Cursor> = None;
+                let mut result : Option<(Row, Cursor)> = None;
                 let callback = |header : PageHeader, page : Vec<u8>| -> Result<bool> {
                     let ptr_size = (OffsetType::BITS / 8) as usize;
                     let ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
@@ -1434,9 +1510,9 @@ pub mod table_management {
                         let start : usize = page.len() - data_offset;
                         let end : usize = page.len() - last_data_offset;
                         let row_bytes : Vec<u8> = page[start..end].into();
-                        let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
+                        let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
                         if self.row_fulfills(&value, &predicate)? {
-                            cursor = Some(Cursor {value, header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()});
+                            result = Some((value, Cursor { header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()}));
                             return Ok(true);
                         }
                         last_data_offset = data_offset;
@@ -1444,13 +1520,14 @@ pub mod table_management {
                     return Ok(false);
                 };
                 self.page_handler.iterate_pages(Box::new(callback))?;
-                return Ok(cursor);
+                return Ok(result);
             }
 
 
 
-            fn next(&self, cursor : &mut Cursor) -> Result<bool> {
+            fn next(&self, cursor : &mut Cursor) -> Result<Option<Row>> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
+                let mut result : Option<Row> = None;
                 let mut found_next = false;
                 let mut initial_ptr_index = cursor.ptr_index;
                 let mut initial_last_data_offset = cursor.data_offset;
@@ -1466,10 +1543,10 @@ pub mod table_management {
                                 let start : usize = page.len() - data_offset;
                                 let end : usize = page.len() - last_data_offset;
                                 let row_bytes : Vec<u8> = page[start..end].to_vec();
-                                let value : Row = row_from_bytes(row_bytes, col_types.clone())?;
+                                let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
                                 if self.row_fulfills(&value, &cursor.predicate)? {
                                     found_next = true;
-                                    cursor.value = value;
+                                    result = Some(value);
                                     cursor.header = header;
                                     cursor.data_offset = data_offset;
                                     cursor.ptr_index = ptr_index+1;
@@ -1482,7 +1559,7 @@ pub mod table_management {
                             return Ok(false);
                         }
                 ))?;
-                return Ok(found_next);
+                return Ok(result);
             }
 
 
@@ -1516,7 +1593,7 @@ pub mod table_management {
                 };
                 let col_types = vec![Type::Text, Type::Number];
                 let row_bytes: Vec<u8> = row.clone().into();
-                let reconstructed_row = simple::row_from_bytes(row_bytes, col_types).unwrap();
+                let reconstructed_row = simple::Row::try_from((row_bytes, col_types)).unwrap();
                 assert_eq!(row.cols.len(), reconstructed_row.cols.len());
                 assert_eq!(row.cols[0].to_string(), reconstructed_row.cols[0].to_string());
                 assert_eq!(row.cols[1].to_string(), reconstructed_row.cols[1].to_string());
@@ -1570,9 +1647,9 @@ pub mod table_management {
                 let cursor_option = select_result.unwrap();
                 assert!(cursor_option.is_some());
                 let cursor = cursor_option.unwrap();
-                assert_eq!(cursor.value.cols.len(), row.cols.len());
-                assert_eq!(cursor.value.cols[0].to_string(), other_row.cols[0].to_string());
-                assert_eq!(cursor.value.cols[1].to_string(), other_row.cols[1].to_string());
+                assert_eq!(cursor.0.cols.len(), row.cols.len());
+                assert_eq!(cursor.0.cols[0].to_string(), other_row.cols[0].to_string());
+                assert_eq!(cursor.0.cols[1].to_string(), other_row.cols[1].to_string());
             }
 
 

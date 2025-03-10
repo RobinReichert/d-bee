@@ -373,14 +373,17 @@ pub mod execution {
 
     use super::parsing::*;
     use crate::{schema::SchemaHandler, storage::{table_management::{Cursor, Operator, Predicate, Row, Type, TableHandler, simple::SimpleTableHandler}, file_management::delete_file}};
-    use std::{io::{Result, Error, ErrorKind}, path::PathBuf, collections::hash_map::HashMap};
+    use std::{io::{Result, Error, ErrorKind}, path::PathBuf, collections::hash_map::HashMap, sync::{RwLock, Mutex}};
+    use rand::RngCore;
+    use hex::encode;
 
 
 
     pub struct Executor {
         db_path : PathBuf,
         schema : SchemaHandler,
-        tables : Vec<(String, Box<dyn TableHandler>)>,
+        tables : RwLock<Vec<(String, Box<dyn TableHandler>)>>,
+        cursors : Mutex<HashMap<Vec<u8>, (String, Cursor)>>,
     }
 
 
@@ -395,14 +398,19 @@ pub mod execution {
             for table_id in table_data.keys() {
                 tables.push((table_id.clone(), Box::new(SimpleTableHandler::new(db_path.join(table_id), table_data.get(table_id).ok_or_else(|| Error::new(ErrorKind::Other, "unexpected error when creating new Executor"))?.clone())?)));
             }
-            return Ok(Executor{db_path, schema, tables});
+            let cursors = Mutex::new(HashMap::new());
+            return Ok(Executor{db_path, schema, tables: RwLock::new(tables), cursors});
         }
 
 
-        fn create(&mut self, args : HashMap<String, Vec<String>>) -> Result<()> {
+        fn create(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
-            if self.tables.iter().any(|(t, _)| *t == table_name) {
-                return Err(Error::new(ErrorKind::InvalidInput, "table exists already"));
+            if let Ok(tables) = self.tables.write() {
+                if tables.iter().any(|(t, _)| *t == table_name) {
+                    return Err(Error::new(ErrorKind::InvalidInput, "table exists already"));
+                }
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
             let col_types : Vec<String> = args.get(COLUMN_TYPE_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col types")})?.clone();
             let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col names")})?.clone();
@@ -414,19 +422,33 @@ pub mod execution {
                 col_data.push((Type::try_from(col_types[i].clone())?, col_names[i].clone()));
             }
             let new_table = Box::new(SimpleTableHandler::new(self.db_path.join(table_name.clone()), col_data.clone())?);
-            self.tables.push((table_name.clone(), new_table));
-            self.schema.add_col_data(table_name.clone(), col_data)?;
-            return Ok(());
+            if let Ok(mut tables) = self.tables.write() {
+                tables.push((table_name.clone(), new_table));
+                for col in col_data {
+                    self.schema.add_col_data(table_name.clone(), col)?;
+                }
+                return Ok(());
+            }else {
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+            }
         }
 
 
-        fn drop(&mut self, args : HashMap<String, Vec<String>>) -> Result<()> {
+        fn drop(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
-            if !self.tables.iter().any(|(t, _)|*t == table_name) {
-                return Err(Error::new(ErrorKind::InvalidInput, "table does not exists"));
+            if let Ok(tables) = self.tables.read() {
+                if !tables.iter().any(|(t, _)|*t == table_name) {
+                    return Err(Error::new(ErrorKind::InvalidInput, "table does not exists"));
+                }
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
             self.schema.remove_table_data(table_name.clone());
-            self.tables.retain(|(t, _)| *t == table_name.clone()); 
+            if let Ok(mut tables) = self.tables.write() {
+                tables.retain(|(t, _)| *t == table_name.clone()); 
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+            }
             delete_file(&self.db_path.join(table_name));             
             return Ok(());
         }
@@ -436,45 +458,70 @@ pub mod execution {
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
             let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col names"))?.clone();
             let col_values : Vec<String> = args.get(COLUMN_VALUE_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.clone();
-            let handler = &self.tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.1;
-            let row = handler.cols_to_row(col_names.into_iter().zip(col_values.into_iter()).collect())?;
-            handler.insert_row(row);
-            return Ok(());
+            if let Ok(tables) = self.tables.read() {
+                let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+                let row = handler.cols_to_row(col_names.into_iter().zip(col_values.into_iter()).collect())?;
+                handler.insert_row(row);
+                return Ok(());
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+            }
         }
 
 
-        fn select(&self, args : HashMap<String, Vec<String>>) -> Result<Option<(String, Cursor)>> {
+        fn select(&self, args : HashMap<String, Vec<String>>) -> Result<Option<(Vec<u8>, Row)>> {
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
             let col_names : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
-            let handler = &self.tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
-            let predicate : Option<Predicate> = match (
-                args.get(PREDICATE_COL),
-                args.get(OPERATOR_KEY),
-                args.get(PREDICATE_VAL),
-            ) {
-                (Some(column), Some(operator), Some(value)) => {
-                    match (
-                        column.first(),
-                        operator.first(),
-                        value.first(),
-                    ){
-                        (Some(column), Some(operator), Some(value)) => {
-                            match (
-                                Operator::try_from(operator.clone()),
-                                handler.create_value(column.clone(), value.clone()),
-                            ) {
-                                (Ok(operator), Ok(value)) => Some(Predicate{column : column.clone(), operator, value}),
-                                _ => None,
+            if let Ok(tables) = self.tables.read() {
+                let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+                let predicate : Option<Predicate> = match (
+                    args.get(PREDICATE_COL),
+                    args.get(OPERATOR_KEY),
+                    args.get(PREDICATE_VAL),
+                ) {
+                    (Some(column), Some(operator), Some(value)) => {
+                        match (
+                            column.first(),
+                            operator.first(),
+                            value.first(),
+                        ){
+                            (Some(column), Some(operator), Some(value)) => {
+                                match (
+                                    Operator::try_from(operator.clone()),
+                                    handler.create_value(column.clone(), value.clone()),
+                                ) {
+                                    (Ok(operator), Ok(value)) => Some(Predicate{column : column.clone(), operator, value}),
+                                    _ => None,
+                                }
+                            },
+                            _ => None,
+                        }
+                    },
+                    _ => None,
+                };
+                Ok(match handler.select_row(predicate)? {
+                    Some((r, c)) => {
+                        let mut hash : Vec<u8> = vec![];
+                        loop {
+                            let mut hash = [0u8; 16];  
+                            rand::thread_rng().fill_bytes(&mut hash);
+                            if let Ok(mut cursors) = self.cursors.lock() {
+                                if cursors.contains_key(&hash.to_vec()) {
+                                    continue;
+                                }
+                                cursors.insert(hash.to_vec(), (table_name, c));
+                                break;
+                            }else{
+                                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
                             }
-                        },
-                        _ => None,
-                    }
-                },
-                _ => None,
-            };
-            Ok(match handler.select_row(predicate)? {
-                Some(c) => Some((table_name, c)), None => None,
-            })
+                        }
+                        Some((hash.to_vec(), r))
+                    },
+                    None => None,
+                })
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+            }
         }
 
 
@@ -482,13 +529,18 @@ pub mod execution {
             todo!();
         }
 
-        pub fn next(&self, (table_name, cursor) : &mut (String, Cursor)) -> Result<bool> {
-            let handler = &self.tables.iter().find(|(t, _)| *t==*table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
-            handler.next(cursor)
+        pub fn next(&self, hash : Vec<u8>) -> Result<Option<Row>> {
+            match (self.tables.read(), self.cursors.lock()) {
+                (Ok(tables), Ok(mut cursors)) => {
+                    let (table_name, cursor) = cursors.get_mut(&hash).ok_or_else(|| Error::new(ErrorKind::InvalidInput, "hash is invalid"))?;
+                    let handler = &tables.iter().find(|(t, _)| *t==*table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+                    handler.next(cursor)},
+                _ => Err(Error::new(ErrorKind::Other, "thread poisoned")),
+            }
         }
 
 
-        pub fn execute(&mut self, query: Query) -> Result<Option<(String, Cursor)>>{
+        pub fn execute(&self, query: Query) -> Result<Option<(Vec<u8>, Row)>>{
             let command = query.plan.get(COMMAND_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "query was not valid")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "command was empty")})?;
             Ok(match command.as_str() {
                 CREATE => {
@@ -542,12 +594,6 @@ pub mod execution {
             e.execute(q6).unwrap();
             let res = e.execute(q5).unwrap();
             if let Some(mut cursor) = res {
-                loop{
-                    println!("{:?}", cursor.1.value); 
-                    if(!e.next(&mut cursor).unwrap()) {
-                        break;
-                    }
-                }
             }
             e.execute(q2).unwrap();
         }
