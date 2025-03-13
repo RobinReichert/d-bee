@@ -10,3 +10,10 @@ dirs = "5.0"
 scopeguard = "1.2.0"
 rand = "0.8"
 hex = "0.4"
+
+[workspace]
+members = [
+    "./",
+    "clients/rust-client"
+]
+
