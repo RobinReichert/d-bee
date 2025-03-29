@@ -934,6 +934,7 @@ pub mod table_management {
 
 
     use std::{
+        collections::HashSet,
         io::{self, Error, ErrorKind, Result},
         path::PathBuf,
         cell::RefCell,
@@ -949,7 +950,7 @@ pub mod table_management {
 
         fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
 
-        fn cols_to_row(&self, cols : Vec<(String, String)>) -> Result<Row>;
+        fn cols_to_row(&self, cols_names : Option<Vec<String>>, col_values : Vec<String>) -> Result<Row>;
 
         fn create_value(&self, col_name : String, value : String) -> Result<Value>;
 
@@ -960,7 +961,7 @@ pub mod table_management {
         ///This method takes a predicate and returns a cursor which holds one value to a row and a
         ///reference to the next cursor which fulfill the predicates claims. In case no row does so
         ///None is returned. Errors may be returned!
-        fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<(Row, Cursor)>>;
+        fn select_row(&self, predicate : Option<Predicate>, cols : Option<Vec<String>>) -> Result<Option<(Row, Cursor)>>;
 
         ///This method takes a predicate and removes all rows that fulfill the predicates claims
         ///from the table this handler works in. May fail and return an error!
@@ -1023,6 +1024,7 @@ pub mod table_management {
         ptr_index : usize,
         data_offset : usize,
         predicate : Option<Predicate>,
+        cols : Option<Vec<String>>,
     }
 
 
@@ -1281,6 +1283,7 @@ pub mod table_management {
                     Type::Text => Value::new_text_from_bytes(col_bytes)?,
                 };
                 row.cols.push(val);
+                println!("last col offset {}", last_col_offset);
                 last_col_offset = col_offset as usize;
             }
             return Ok(row);
@@ -1332,6 +1335,31 @@ pub mod table_management {
            }
 
 
+           fn validate_cols(&self, col_names : Vec<String>) -> Result<()> {
+               let col_name_sett: HashSet<_> = col_names.iter().collect();
+               let col_data_set: HashSet<_> = self.col_data.iter().map(|(_, n)| n).collect();
+               if !col_name_sett.is_subset(&col_data_set) {
+                   return Err(Error::new(ErrorKind::Other, "table does not contain these cols"));
+               }
+               return Ok(());
+           }
+
+
+           fn filter_row(&self, row : &mut Row, cols : Vec<String>) -> Result<()> {
+               if self.col_data.len() != row.cols.len() {
+                   return Err(Error::new(ErrorKind::InvalidInput, "row was already filtered"));
+               }
+               self.validate_cols(cols.clone())?;
+               let len = self.col_data.len();
+               for i in (0..len).rev() {
+                   if !cols.contains(&self.col_data[i].1) {
+                       row.cols.remove(i); 
+                   }
+               }
+               return Ok(());
+           }
+
+
         }
 
 
@@ -1341,7 +1369,7 @@ pub mod table_management {
 
 
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-                let (mut row, mut cursor) = self.select_row(Some(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)})).unwrap().unwrap();
+                let (mut row, mut cursor) = self.select_row(Some(Predicate{ column: "Age".to_string(), operator: Operator::Bigger, value: Value::new_number(0)}), None).unwrap().unwrap();
                 let mut bubble = Bubble::new(vec![40, 20]);
                 bubble.add_line(self.col_data.iter().map(|x| x.1.clone()).collect());
                 bubble.add_divider();
@@ -1380,7 +1408,20 @@ pub mod table_management {
             }
 
 
-            fn cols_to_row(&self, mut cols : Vec<(String, String)>) -> Result<Row> {
+
+
+            fn cols_to_row(&self, mut col_names_option : Option<Vec<String>>, col_values : Vec<String>) -> Result<Row> {
+                let col_names : Vec<String> = match col_names_option {
+                    Some(c) => {
+                        self.validate_cols(c.clone())?;
+                        c
+                    },
+                    None => self.col_data.clone().into_iter().map(|(_, n)| n).collect(),
+                };
+                if col_names.len() != col_values.len() {
+                    return Err(Error::new(ErrorKind::InvalidInput, "amount of values and columns did not match"));
+                }
+                let mut cols : Vec<(String, String)> = col_names.into_iter().zip(col_values.into_iter()).collect();
                 cols.sort_by_key(|(n, _)| self.col_data.iter().position(|(_, s)| s==n));
                 let mut res : Vec<Value> = vec![];
                 for (index, (name, value)) in cols.iter().enumerate() {
@@ -1441,17 +1482,20 @@ pub mod table_management {
             fn delete_row(&self, predicate : Option<Predicate>) -> Result<()> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
+                    println!("{:?}", page);
                     let mut new_used = header.used;
                     let ptr_size = (OffsetType::BITS / 8) as usize;
                     //Get pointer count in order to then iterate over all rows in the page. 
                     let mut ptr_count = OffsetType::from_le_bytes(page[0..ptr_size].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for ptr_count")})?) as usize;
                     let mut previous_data_offset : usize = 0;
-                    //Get offset of last page
-                    let last_offset_start = (ptr_count)*ptr_size;
-                    let last_offset_end = (ptr_count+1)*ptr_size;
-                    let mut last_offset = OffsetType::from_le_bytes(page[last_offset_start..last_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for last_offset")})?) as usize;
                     //Iterate over all rows in the page
-                    for ptr_index in 0..ptr_count.clone() {
+                    let mut ptr_index = 0;
+                    while ptr_index < ptr_count {
+                        //Get offset of last page
+                        let last_offset_start = (ptr_count)*ptr_size;
+                        let last_offset_end = (ptr_count+1)*ptr_size;
+                        let mut last_offset = OffsetType::from_le_bytes(page[last_offset_start..last_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for last_offset")})?) as usize;
+                        println!("ptr index: {}", ptr_index);
                         //Get the row
                         let current_offset_start = (ptr_index + 1) * ptr_size;
                         let current_offset_end = (ptr_index + 2) * ptr_size;
@@ -1459,12 +1503,18 @@ pub mod table_management {
                         let data_start : usize = page.len() - data_offset;
                         let data_end : usize = page.len() - previous_data_offset;
                         let row_bytes : Vec<u8> = page[data_start..data_end].into();
+                        println!("data offset: {}", data_offset);
+                        println!("previous offset: {}", previous_data_offset);
+                        println!("row len: {}", data_end - data_start);
+                        println!("row bytes: {:?}", row_bytes);
                         let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
                         if self.row_fulfills(&value, &predicate)? {
                             //Shift the data left of the deleted row to the right, just over it
                             let row_size = data_end - data_start;
                             let last_data_start = page.len()-last_offset;
+                            println!("last data start: {}", last_data_start);
                             let remainder_bytes = &page[last_data_start..data_start].to_vec();
+                            println!("remainder bytes len: {}", remainder_bytes.len());
                             page[(data_end-remainder_bytes.len())..data_end].copy_from_slice(remainder_bytes);
                             for remaining_index in ptr_index..ptr_count {
                                 //Shift the data_offsets to the left over the deleted data_offset
@@ -1480,8 +1530,11 @@ pub mod table_management {
                             new_used -= (row_size + ptr_size);
                             last_offset += row_size;
                             ptr_count -= 1;
+                            println!("{:?}", page);
+                        }else{
+                            ptr_index += 1;
+                            previous_data_offset = data_offset;
                         }
-                        previous_data_offset = data_offset;
                     }
                     if new_used != header.used {
                         //Write back page if it changed
@@ -1496,7 +1549,7 @@ pub mod table_management {
 
 
 
-            fn select_row(&self, predicate : Option<Predicate>) -> Result<Option<(Row, Cursor)>> {
+            fn select_row(&self, predicate : Option<Predicate>, cols : Option<Vec<String>>) -> Result<Option<(Row, Cursor)>> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let mut result : Option<(Row, Cursor)> = None;
                 let callback = |header : PageHeader, page : Vec<u8>| -> Result<bool> {
@@ -1510,9 +1563,12 @@ pub mod table_management {
                         let start : usize = page.len() - data_offset;
                         let end : usize = page.len() - last_data_offset;
                         let row_bytes : Vec<u8> = page[start..end].into();
-                        let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
-                        if self.row_fulfills(&value, &predicate)? {
-                            result = Some((value, Cursor { header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone()}));
+                        let mut row : Row = Row::try_from((row_bytes, col_types.clone()))?;
+                        if self.row_fulfills(&row, &predicate)? {
+                            if let Some(cs) = cols.clone() {
+                                self.filter_row(&mut row, cs)?;
+                            }
+                            result = Some((row, Cursor { header, ptr_index: ptr_index+1, data_offset, predicate: predicate.clone(), cols: cols.clone()}));
                             return Ok(true);
                         }
                         last_data_offset = data_offset;
@@ -1543,10 +1599,13 @@ pub mod table_management {
                                 let start : usize = page.len() - data_offset;
                                 let end : usize = page.len() - last_data_offset;
                                 let row_bytes : Vec<u8> = page[start..end].to_vec();
-                                let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
-                                if self.row_fulfills(&value, &cursor.predicate)? {
+                                let mut row : Row = Row::try_from((row_bytes, col_types.clone()))?;
+                                if self.row_fulfills(&row, &cursor.predicate)? {
+                                    if let Some(cs) = cursor.cols.clone() {
+                                        self.filter_row(&mut row, cs)?;
+                                    }
+                                    result = Some(row);
                                     found_next = true;
-                                    result = Some(value);
                                     cursor.header = header;
                                     cursor.data_offset = data_offset;
                                     cursor.ptr_index = ptr_index+1;
@@ -1642,7 +1701,7 @@ pub mod table_management {
                     value: Value::new_number(10),
                 };
                 handler.delete_row(Some(predicate.clone())).unwrap();
-                let select_result = handler.select_row(Some(other_predicate));
+                let select_result = handler.select_row(Some(other_predicate), None);
                 assert!(select_result.is_ok());
                 let cursor_option = select_result.unwrap();
                 assert!(cursor_option.is_some());
@@ -1652,6 +1711,50 @@ pub mod table_management {
                 assert_eq!(cursor.0.cols[1].to_string(), other_row.cols[1].to_string());
             }
 
+            #[test]
+            fn insert_delete_select_test() {
+                let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_insert_and_select.test");
+                file_management::delete_file(&table_path);
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string()), (Type::Number, "Score".to_string())];
+                let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
+                let row = Row {
+                    cols: vec![
+                        Value::new_text("Alice".to_string()),
+                        Value::new_number(30),
+                        Value::new_number(10),
+                    ],
+                };
+                let other_row = Row{cols: vec![
+                    Value::new_text("Bob".to_string()),
+                    Value::new_number(10),
+                    Value::new_number(5),
+                ]
+                };
+                let third_row = Row{cols: vec![
+                    Value::new_text("Chris".to_string()),
+                    Value::new_number(12),
+                    Value::new_number(3),
+                ]
+                };
+                // Insert the row
+                handler.insert_row(row.clone()).unwrap();
+                handler.insert_row(other_row.clone()).unwrap();
+                // Select the row
+                let predicate = Predicate {
+                    column: "Age".to_string(),
+                    operator: Operator::Equal,
+                    value: Value::new_number(30),
+                };
+                handler.delete_row(Some(predicate.clone())).unwrap();
+                let select_result = handler.select_row(None, None);
+                assert!(select_result.is_ok());
+                let cursor_option = select_result.unwrap();
+                assert!(cursor_option.is_some());
+                let cursor = cursor_option.unwrap();
+                assert_eq!(cursor.0.cols.len(), row.cols.len());
+                assert_eq!(cursor.0.cols[0].to_string(), other_row.cols[0].to_string());
+                assert_eq!(cursor.0.cols[1].to_string(), other_row.cols[1].to_string());
+            }
 
 
         }

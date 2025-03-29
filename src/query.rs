@@ -164,8 +164,8 @@ pub mod parsing {
     pub const OPERATOR_KEY : &str = "operator";
     pub const EQUAL : &str = "equal";
     pub const NOT_EQUAL : &str = "not_equal";
-    pub const SMALLER : &str = "smaller";
-    pub const SMALLER_EQUAL : &str = "smaller_equal";
+    pub const SMALLER : &str = "less";
+    pub const SMALLER_EQUAL : &str = "less_equal";
     pub const BIGGER : &str = "bigger";
     pub const BIGGER_EQUAL : &str = "bigger_equal";
     pub const PREDICATE_COL : &str = "predicate_col";
@@ -396,7 +396,7 @@ pub mod execution {
             let mut tables : Vec<(String, Box<dyn TableHandler>)> = vec![];
             let table_data = schema.get_table_data()?;
             for table_id in table_data.keys() {
-                tables.push((table_id.clone(), Box::new(SimpleTableHandler::new(db_path.join(table_id), table_data.get(table_id).ok_or_else(|| Error::new(ErrorKind::Other, "unexpected error when creating new Executor"))?.clone())?)));
+                tables.push((table_id.clone(), Box::new(SimpleTableHandler::new(db_path.join(format!("{}.hive", table_id)), table_data.get(table_id).ok_or_else(|| Error::new(ErrorKind::Other, "unexpected error when creating new Executor"))?.clone())?)));
             }
             let cursors = Mutex::new(HashMap::new());
             return Ok(Executor{db_path, schema, tables: RwLock::new(tables), cursors});
@@ -421,7 +421,7 @@ pub mod execution {
             for i in 0..col_types.len() {
                 col_data.push((Type::try_from(col_types[i].clone())?, col_names[i].clone()));
             }
-            let new_table = Box::new(SimpleTableHandler::new(self.db_path.join(table_name.clone()), col_data.clone())?);
+            let new_table = Box::new(SimpleTableHandler::new(self.db_path.join(format!("{}.hive", table_name)), col_data.clone())?);
             if let Ok(mut tables) = self.tables.write() {
                 tables.push((table_name.clone(), new_table));
                 for col in col_data {
@@ -443,24 +443,29 @@ pub mod execution {
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
-            self.schema.remove_table_data(table_name.clone());
+            self.schema.remove_table_data(table_name.clone())?;
             if let Ok(mut tables) = self.tables.write() {
-                tables.retain(|(t, _)| *t == table_name.clone()); 
+                tables.retain(|(n, _)| *n != table_name.clone()); 
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
-            delete_file(&self.db_path.join(table_name));             
+            delete_file(&self.db_path.join(format!("{}.hive", table_name)));             
             return Ok(());
         }
 
 
         fn insert(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
-            let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col names"))?.clone();
+            let col_names_option : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
             let col_values : Vec<String> = args.get(COLUMN_VALUE_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.clone();
+            if let Some(ref col_names) = col_names_option {
+                if col_names.len() != col_values.len() {
+                    return Err(Error::new(ErrorKind::InvalidInput, "amount of values and columns did not match"));
+                }
+            }
             if let Ok(tables) = self.tables.read() {
                 let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
-                let row = handler.cols_to_row(col_names.into_iter().zip(col_values.into_iter()).collect())?;
+                let row = handler.cols_to_row(col_names_option, col_values)?;
                 handler.insert_row(row);
                 return Ok(());
             }else{
@@ -486,24 +491,19 @@ pub mod execution {
                             value.first(),
                         ){
                             (Some(column), Some(operator), Some(value)) => {
-                                match (
-                                    Operator::try_from(operator.clone()),
-                                    handler.create_value(column.clone(), value.clone()),
-                                ) {
-                                    (Ok(operator), Ok(value)) => Some(Predicate{column : column.clone(), operator, value}),
-                                    _ => None,
-                                }
+                                let operator = Operator::try_from(operator.clone())?;
+                                let value = handler.create_value(column.clone(), value.clone())?;
+                                Some(Predicate{column : column.clone(), operator, value})
                             },
                             _ => None,
                         }
                     },
                     _ => None,
                 };
-                Ok(match handler.select_row(predicate)? {
+                Ok(match handler.select_row(predicate, col_names)? {
                     Some((r, c)) => {
-                        let mut hash : Vec<u8> = vec![];
+                        let mut hash = [0u8; 16];  
                         loop {
-                            let mut hash = [0u8; 16];  
                             rand::thread_rng().fill_bytes(&mut hash);
                             if let Ok(mut cursors) = self.cursors.lock() {
                                 if cursors.contains_key(&hash.to_vec()) {

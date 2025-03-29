@@ -10,6 +10,7 @@ dirs = "5.0"
 scopeguard = "1.2.0"
 rand = "0.8"
 hex = "0.4"
+rust-client = { path = "clients/rust-client" }
 
 [workspace]
 members = [

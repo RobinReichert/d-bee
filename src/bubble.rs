@@ -9,6 +9,34 @@ pub struct Bubble {
 }
 
 impl Bubble {
+
+    pub fn get_divider(&self) -> String {
+        let mut result = String::new();
+        for j in 0..self.width.len() {
+            result.push_str("+");
+            for i in 0..self.width[j] {
+                result.push_str("-");
+            }
+        }
+        result.push_str("+");
+        return result;
+    }
+
+    pub fn format_line(&self, content : Vec<String>) -> String {
+        let mut result : String = String::new();
+        for i in 0..self.width.len() {
+            result.push_str("|"); 
+            let mut line = String::from(content[i].clone());
+            line.truncate(self.width[i]);
+            result.push_str(&line);
+            for _ in content[i].len()..self.width[i] {
+                result.push_str(" ");
+            }
+        }
+        result.push_str("|"); 
+        return result;
+    }
+
     pub fn new(width : Vec<usize>) -> Bubble {
         let mut bubble = Bubble{width, content: String::new()};
         bubble.add_divider(); 
@@ -16,27 +44,13 @@ impl Bubble {
     }
 
     pub fn add_divider(&mut self) {
-        for j in 0..self.width.len() {
-            self.content.push_str("+");
-            for i in 0..self.width[j] {
-                self.content.push_str("-");
-            }
-        }
-        self.content.push_str("+");
+        self.content.push_str(&self.get_divider());
         self.content.push_str("\n");
 
     }
 
     pub fn add_line(&mut self, content : Vec<String>) {
-        for i in 0..self.width.len() {
-            self.content.push_str("|"); 
-            let mut line = String::from(content[i].clone());
-            line.truncate(self.width[i]);
-            self.content.push_str(&line);
-            for _ in content[i].len()..self.width[i] {
-                self.content.push_str(" ");
-            }
-        }
+        self.content.push_str(&self.format_line(content));
         self.content.push_str("|\n");
     }
 }

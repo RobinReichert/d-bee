@@ -38,7 +38,7 @@ impl SchemaHandler {
 
         //Query the table for rows that match the table name.
         let predicate : Predicate = Predicate{column: "table_id".to_string(), operator: Operator::Equal, value: Value::new_text(table) };
-        let res = self.table_handler.select_row(Some(predicate))?;
+        let res = self.table_handler.select_row(Some(predicate), None)?;
 
         //Error check query result.
         if let Some((mut value, mut cursor)) = res {
@@ -73,7 +73,7 @@ impl SchemaHandler {
     pub fn add_col_data(&self, table : String, col : (Type, String)) -> Result<()> {
         let predicate : Predicate = Predicate{column: "table_id".to_string(), operator: Operator::Equal, value: Value::new_text(table.clone())};
         let mut index = 0;
-        if let Some((mut value, mut cursor)) = self.table_handler.select_row(Some(predicate))? {
+        if let Some((mut value, mut cursor)) = self.table_handler.select_row(Some(predicate), None)? {
             loop{
                 index += 1;
                 if value.cols.iter().any(|n| Value::Text(col.1.clone()) == *n) {
@@ -97,7 +97,7 @@ impl SchemaHandler {
         let mut table_data : HashMap<String, Vec<(u64, String, Type)>> = HashMap::new();
 
         //Query the table without a predicate and thereby get all cols.
-        let res = self.table_handler.select_row(None)?;
+        let res = self.table_handler.select_row(None, None)?;
         if let Some((mut value, mut cursor)) = res {
             loop {
                 let row = value.clone();
