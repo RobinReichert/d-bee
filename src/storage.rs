@@ -1283,7 +1283,6 @@ pub mod table_management {
                     Type::Text => Value::new_text_from_bytes(col_bytes)?,
                 };
                 row.cols.push(val);
-                println!("last col offset {}", last_col_offset);
                 last_col_offset = col_offset as usize;
             }
             return Ok(row);
@@ -1482,7 +1481,6 @@ pub mod table_management {
             fn delete_row(&self, predicate : Option<Predicate>) -> Result<()> {
                 let col_types : Vec<Type> = self.col_data.iter().map(|x| x.0.clone()).collect();
                 let callback = |header : PageHeader, mut page : Vec<u8>| -> Result<bool> {
-                    println!("{:?}", page);
                     let mut new_used = header.used;
                     let ptr_size = (OffsetType::BITS / 8) as usize;
                     //Get pointer count in order to then iterate over all rows in the page. 
@@ -1495,7 +1493,6 @@ pub mod table_management {
                         let last_offset_start = (ptr_count)*ptr_size;
                         let last_offset_end = (ptr_count+1)*ptr_size;
                         let mut last_offset = OffsetType::from_le_bytes(page[last_offset_start..last_offset_end].try_into().map_err(|_| {Error::new(ErrorKind::UnexpectedEof, "not enough bytes for last_offset")})?) as usize;
-                        println!("ptr index: {}", ptr_index);
                         //Get the row
                         let current_offset_start = (ptr_index + 1) * ptr_size;
                         let current_offset_end = (ptr_index + 2) * ptr_size;
@@ -1503,18 +1500,12 @@ pub mod table_management {
                         let data_start : usize = page.len() - data_offset;
                         let data_end : usize = page.len() - previous_data_offset;
                         let row_bytes : Vec<u8> = page[data_start..data_end].into();
-                        println!("data offset: {}", data_offset);
-                        println!("previous offset: {}", previous_data_offset);
-                        println!("row len: {}", data_end - data_start);
-                        println!("row bytes: {:?}", row_bytes);
                         let value : Row = Row::try_from((row_bytes, col_types.clone()))?;
                         if self.row_fulfills(&value, &predicate)? {
                             //Shift the data left of the deleted row to the right, just over it
                             let row_size = data_end - data_start;
                             let last_data_start = page.len()-last_offset;
-                            println!("last data start: {}", last_data_start);
                             let remainder_bytes = &page[last_data_start..data_start].to_vec();
-                            println!("remainder bytes len: {}", remainder_bytes.len());
                             page[(data_end-remainder_bytes.len())..data_end].copy_from_slice(remainder_bytes);
                             for remaining_index in ptr_index..ptr_count {
                                 //Shift the data_offsets to the left over the deleted data_offset
@@ -1530,7 +1521,6 @@ pub mod table_management {
                             new_used -= (row_size + ptr_size);
                             last_offset += row_size;
                             ptr_count -= 1;
-                            println!("{:?}", page);
                         }else{
                             ptr_index += 1;
                             previous_data_offset = data_offset;

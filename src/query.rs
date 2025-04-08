@@ -526,7 +526,35 @@ pub mod execution {
 
 
         fn delete(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
-            todo!();
+            let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
+            let col_names : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
+            if let Ok(tables) = self.tables.read() {
+                let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+                let predicate : Option<Predicate> = match (
+                    args.get(PREDICATE_COL),
+                    args.get(OPERATOR_KEY),
+                    args.get(PREDICATE_VAL),
+                ) {
+                    (Some(column), Some(operator), Some(value)) => {
+                        match (
+                            column.first(),
+                            operator.first(),
+                            value.first(),
+                        ){
+                            (Some(column), Some(operator), Some(value)) => {
+                                let operator = Operator::try_from(operator.clone())?;
+                                let value = handler.create_value(column.clone(), value.clone())?;
+                                Some(Predicate{column : column.clone(), operator, value})
+                            },
+                            _ => None,
+                        }
+                    },
+                    _ => None,
+                };
+                Ok(handler.delete_row(predicate)?)
+            }else{
+                return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+            }
         }
 
         pub fn next(&self, hash : Vec<u8>) -> Result<Option<Row>> {

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+mio = { version = "0.8", features = ["net", "os-poll"] }
 libc = "0.2"
 regex = "1"
 dirs = "5.0"

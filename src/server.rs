@@ -1,7 +1,9 @@
 #![allow(unused)]
 
 
-use std::{net::{TcpListener, TcpStream}, io::{Result, Read, Write}, thread, sync::{atomic::AtomicBool, Arc, Mutex, Condvar}};
+use std::{io::{ErrorKind, Result, Read, Write}, thread, sync::{atomic::AtomicBool, Arc, Mutex, Condvar}, collections::HashMap};
+use mio::{Poll, Token, Interest, Events};
+use mio::net::{TcpListener, TcpStream};
 use crate::{query::{execution::Executor, parsing::Query}, storage::{file_management::get_base_path, table_management::{Row, Type}}};
 
 
@@ -11,13 +13,13 @@ const CURSOR_FLAG : u8 = 0x01;
 
 pub struct Server {
     executor : Arc<Executor>,
-    work : Mutex<Vec<Option<TcpStream>>>,
+    work : Mutex<Vec<Option<Arc<TcpStream>>>>,
     condvar : Condvar,
 }
 
 
 impl Server {
-
+ 
     pub fn new() -> Arc<Self> {
         let path = get_base_path().expect("failed to get base path").join("standard");
         let executor = Arc::new(Executor::new(path).expect("failed to create Executor"));
@@ -29,35 +31,62 @@ impl Server {
         return server_arc;
     }
 
+    const SERVER : Token = Token(0);
+
     pub fn start(self: Arc<Self>, num_thread : usize, terminate : Arc<AtomicBool>) -> Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:4321")?;
         let mut threads = Vec::new();
         for i in 0..num_thread {
             let server_clone : Arc<Server> = Arc::clone(&self); 
             threads.push(thread::spawn(move || server_clone.handle_client()));
         }
-        for stream in listener.incoming() {
-            if terminate.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Ok(mut work) = self.work.lock() {
-                    for _ in 0..num_thread {
-                        work.push(None);
-                        self.condvar.notify_one();
-                    }
+        let mut listener :TcpListener = TcpListener::bind("127.0.0.1:4321".parse().unwrap())?;
+        let mut connections : HashMap<Token, Arc<TcpStream>> = HashMap::new();
+        let mut poll : Poll = Poll::new()?;
+        let mut events : Events = Events::with_capacity(128);
+        let mut token_value = 1;
+        poll.registry().register(&mut listener, Self::SERVER, Interest::READABLE)?;
+        loop {
+            poll.poll(&mut events, None)?;
+
+            for event in events.iter() {
+                match event.token() {
+                    Self::SERVER => {
+                        if terminate.load(std::sync::atomic::Ordering::Relaxed) {
+                            if let Ok(mut work) = self.work.lock() {
+                                for _ in 0..num_thread {
+                                    work.push(None);
+                                    self.condvar.notify_one();
+                                }
+                            }
+                            for thread in threads {
+                                thread.join();
+                            }
+                            return Ok(());
+                        }
+                        match listener.accept() {
+                            Ok((mut stream, _)) => {
+                                let token = Token(token_value);
+                                token_value += 1;
+                                poll.registry().register(&mut stream, token, Interest::READABLE)?;
+                                let stream_arc = Arc::new(stream);
+                                connections.insert(token, stream_arc);
+                            },
+                            Err(e) => (),
+                        }
+                    },
+                    token => {
+                        let stream = match connections.get_mut(&token) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+                        if let Ok(mut work) = self.work.lock() {
+                            work.push(Some(stream.clone()));
+                            self.condvar.notify_one();
+                        }
+                    },
                 }
-                for thread in threads {
-                    thread.join();
-                }
-                break;
             }
-            match stream {
-                Ok(stream) => {
-                    if let Ok(mut work) = self.work.lock() {
-                        work.push(Some(stream));
-                        self.condvar.notify_one();
-                    }
-                },
-                Err(e) => println!("Connection failed: {}", e),
-            }
+
         }
         return Ok(());
     }
@@ -65,7 +94,7 @@ impl Server {
     fn handle_client(self: Arc<Self>) {
         'outer:
             loop {
-                let mut stream : TcpStream = match self.work.lock() {
+                let mut stream : Arc<TcpStream> = match self.work.lock() {
                     Ok(mut work) => {
                         while work.is_empty() {
                             work = self.condvar.wait(work).expect("thread poisoned")
@@ -77,34 +106,36 @@ impl Server {
                     },
                     Err(_) => continue 'outer,
                 };
-                let mut buffer = [0; 512];
-                match stream.read(&mut buffer) {
-                    Ok(length) => {
-                        if let Some(flag) = buffer.get(0) {
-                            let data = match buffer.get(1..length) {
-                                Some(slice) => slice,
-                                _ => return,
-                            };
-                            match *flag {
-                                QUERY_FLAG => {
-                                    self.query(String::from_utf8_lossy(data).to_string(), stream);
-                                },
-                                CURSOR_FLAG => {
-                                    self.next(data.to_vec(), stream);
-                                },
-                                _ => println!("Invalid flag"),
-                            }
-                        }else{
-                            println!("Message was empty!");
+                let mut buff = [0u8; 512];
+                match stream.as_ref().read(&mut buff) {
+                    Ok(len) => {
+                        if len < 1 {
+                            continue;
                         }
+                        let mut req = buff.to_vec();
+                        req.truncate(len);
+                        match req.remove(0) {
+                            QUERY_FLAG => {
+                                let q = String::from_utf8_lossy(&req).to_string();
+                                self.query(q, stream);
+                            },
+                            CURSOR_FLAG => {
+                                self.next(req.to_vec(), stream);
+                            },
+                            _ => println!("Invalid flag"),
+                        }
+                    }
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    }
+                    Err(e) => {
+                        println!("error: {}", e);
+                        continue;
                     },
-                    Err(e) => println!("Failed to read from client: {}", e),
                 }
             }
     }
 
-
-    fn query(&self, args: String, mut stream : TcpStream) {
+    fn query(&self, args: String, mut stream : Arc<TcpStream>) {
         let mut response : Vec<u8> = vec![];
         match Query::from(args) {
             Ok(query) =>
@@ -128,11 +159,11 @@ impl Server {
                 response.extend(e.to_string().into_bytes());
             },
         }
-        stream.write_all(&response);
-        stream.flush();
+        stream.as_ref().write_all(&response);
+        stream.as_ref().flush();
     }
 
-    fn next(&self, args: Vec<u8>, mut stream : TcpStream) {
+    fn next(&self, args: Vec<u8>, mut stream : Arc<TcpStream>) {
         let mut response : Vec<u8> = vec![];
         match self.executor.next(args) {
             Ok(Some(row)) => {
@@ -148,8 +179,8 @@ impl Server {
                 response.extend(e.to_string().into_bytes());
             }
         }
-        stream.write_all(&response);
-        stream.flush();
+        stream.as_ref().write_all(&response);
+        stream.as_ref().flush();
     }
 
     fn encode_row(row : Row) -> Vec<u8> {

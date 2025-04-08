@@ -74,50 +74,64 @@ fn decode_row(bytes : Vec<u8>) -> Result<Vec<Value>> {
         index += len;
         row.push(val);
     }
+    row.reverse();
     return Ok(row);
 }
 
-pub fn query(query : String) -> Result<Option<Cursor>> {
-    let mut message : Vec<u8> = vec![];
-    message.push(QUERY_FLAG);
-    message.extend(query.as_bytes());
-    let mut stream = TcpStream::connect("127.0.0.1:4321")?;
-    stream.write_all(&message)?;
-    let mut buffer = vec![0; 1024];
-    let len = stream.read(&mut buffer)?;
-    buffer.truncate(len);
-    if len < 1 {
-        return Err(Error::new(ErrorKind::InvalidData, "response was empty"));
-    }
-    match buffer.remove(0) {
-        0 => Ok(Some(Cursor::try_from(buffer)?)),
-        1 => Ok(None),
-        2 => Err(Error::new(ErrorKind::Other, String::from_utf8_lossy(&buffer))),
-        _ => Err(Error::new(ErrorKind::InvalidData, "response had invalid status code")),
-    }
+pub struct Connection {
+    stream : TcpStream,
 }
 
-pub fn next(cursor : &mut Cursor) -> Result<bool> {
-    let mut message : Vec<u8> = vec![];
-    message.push(CURSOR_FLAG);
-    message.extend(cursor.hash.clone());
-    let mut stream = TcpStream::connect("127.0.0.1:4321")?;
-    stream.write_all(&message)?;
-    let mut buffer = vec![0; 1024];
-    let len = stream.read(&mut buffer)?;
-    buffer.truncate(len);
-    if len < 1 {
-        return Err(Error::new(ErrorKind::InvalidData, "response was empty"));
+
+impl Connection {
+
+    pub fn new(address : String) -> Result<Self> {
+        let stream = TcpStream::connect(&address)?;
+        return Ok(Connection{stream});
     }
-    match buffer.remove(0) {
-        0 => {
-            cursor.row = decode_row(buffer)?;
-            Ok(true)
-        },
-        1 => Ok(false),
-        2 => Err(Error::new(ErrorKind::Other, String::from_utf8_lossy(&buffer))),
-        _ => Err(Error::new(ErrorKind::InvalidData, "response had invalid status code")),
+
+    pub fn query(&mut self, query : String) -> Result<Option<Cursor>> {
+        let mut message : Vec<u8> = vec![];
+        message.push(QUERY_FLAG);
+        message.extend(query.as_bytes());
+        self.stream.write_all(&message)?;
+        let mut buffer = vec![0; 1024];
+        let len = self.stream.read(&mut buffer)?;
+        buffer.truncate(len);
+        if len < 1 {
+            return Err(Error::new(ErrorKind::InvalidData, "response was empty"));
+        }
+        match buffer.remove(0) {
+            0 => Ok(Some(Cursor::try_from(buffer)?)),
+            1 => Ok(None),
+            2 => Err(Error::new(ErrorKind::Other, String::from_utf8_lossy(&buffer))),
+            _ => Err(Error::new(ErrorKind::InvalidData, "response had invalid status code")),
+        }
     }
+
+
+    pub fn next(&mut self, cursor : &mut Cursor) -> Result<bool> {
+        let mut message : Vec<u8> = vec![];
+        message.push(CURSOR_FLAG);
+        message.extend(cursor.hash.clone());
+        self.stream.write_all(&message)?;
+        let mut buffer = vec![0; 1024];
+        let len = self.stream.read(&mut buffer)?;
+        buffer.truncate(len);
+        if len < 1 {
+            return Err(Error::new(ErrorKind::InvalidData, "response was empty"));
+        }
+        match buffer.remove(0) {
+            0 => {
+                cursor.row = decode_row(buffer)?;
+                Ok(true)
+            },
+            1 => Ok(false),
+            2 => Err(Error::new(ErrorKind::Other, String::from_utf8_lossy(&buffer))),
+            _ => Err(Error::new(ErrorKind::InvalidData, "response had invalid status code")),
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -129,7 +143,7 @@ mod tests {
     #[test]
     fn o() {
         for i in 0..1000 {
-        query(format!("INSERT INTO numbers VALUES ({});", i).to_string()).unwrap();
+            query(format!("INSERT INTO numbers VALUES ({});", i).to_string()).unwrap();
         }
     }
 
