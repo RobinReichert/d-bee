@@ -1155,6 +1155,31 @@ pub mod table_management {
     }
 
 
+    impl TryInto<String> for Value {
+        type Error = std::io::Error;
+        
+        fn try_into(self) -> std::result::Result<String, Self::Error> {
+            match self {
+                Self::Text(val) => Ok(val),
+                Self::Number(_) => Err(Error::new(ErrorKind::InvalidInput, "could not convert number to String")), 
+            }
+        }
+
+    }
+
+
+    impl TryInto<u64> for Value {
+        type Error = std::io::Error;
+        fn try_into(self) -> std::result::Result<u64, Self::Error> {
+            match self {
+                Self::Text(_) => Err(Error::new(ErrorKind::InvalidInput, "could not convert text to u64")), 
+                Self::Number(val) => Ok(val),
+            }
+        }
+
+    }
+
+
 
 #[cfg(test)]
     impl Display for Value {

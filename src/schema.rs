@@ -2,22 +2,22 @@
 
 
 
-use std::{io::Result, path::PathBuf, io::{Error, ErrorKind}, collections::hash_map::HashMap};
+use std::{io::Result, path::PathBuf, io::{Error, ErrorKind}, collections::hash_map::HashMap, sync::Mutex};
 use crate::storage::{table_management::{Row, Type, Predicate, Operator, Value, TableHandler, simple::SimpleTableHandler}, file_management::*};
 
 
 
-pub struct SchemaHandler {
+pub struct TableSchemaHandler {
     table_handler: Box<dyn TableHandler>
 }
 
 
 
-impl SchemaHandler {
+impl TableSchemaHandler {
 
-    ///Creates an instance of a SchemaHandler. Takes the path of the corresponding database as an
+    ///Creates an instance of a TableSchemaHandler. Takes the path of the corresponding database as an
     ///argument.
-    pub fn new(db_path: &PathBuf) -> Result<SchemaHandler> {
+    pub fn new(db_path: &PathBuf) -> Result<TableSchemaHandler> {
 
         //Create table at: 
         let path = db_path.join("schema.hive");
@@ -29,7 +29,7 @@ impl SchemaHandler {
         //Col_id -> this stores the index of a col inside a table in order to order them, since this is important for the creation of a TableHandler.
         let col_data : Vec<(Type, String)> = vec![(Type::Text, "table_id"), (Type::Text, "col_name"), (Type::Number, "col_type"), (Type::Number, "col_id")].into_iter().map(|(t, n)| (t, n.to_string())).collect();
         let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
-        return Ok(SchemaHandler{table_handler});
+        return Ok(TableSchemaHandler{table_handler});
     }
 
     ///Collects data of one table and then returns the cols. Takes the table name that should be
@@ -162,15 +162,15 @@ mod test {
     fn test_schema_handler_creation() {
         let db_path = get_test_path().unwrap();
         delete_file(&db_path.join("schema.hive"));
-        let schema_handler = SchemaHandler::new(&db_path);
-        assert!(schema_handler.is_ok(), "SchemaHandler should be created successfully");
+        let schema_handler = TableSchemaHandler::new(&db_path);
+        assert!(schema_handler.is_ok(), "TableSchemaHandler should be created successfully");
     }
 
 #[test]
     fn test_add_and_get_col_data() {
         let db_path = get_test_path().unwrap();
         delete_file(&db_path.join("schema.hive"));
-        let schema_handler = SchemaHandler::new(&db_path).unwrap();
+        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
         let table_name = "test_table".to_string();
         let col_data = vec![(Type::Text, "name".to_string()), (Type::Number, "age".to_string())];
 
@@ -189,7 +189,7 @@ mod test {
     fn test_get_col_data_empty() {
         let db_path = get_test_path().unwrap();
         delete_file(&db_path.join("schema.hive"));
-        let schema_handler = SchemaHandler::new(&db_path).unwrap();
+        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
 
         let table_name = "non_existent_table".to_string();
         let retrieved_data = schema_handler.get_col_data(table_name);
@@ -200,3 +200,74 @@ mod test {
 }
 
 
+pub struct DatabaseSchemaHandler {
+    table_handler : Box<dyn TableHandler>, 
+    databases : Mutex<HashMap<String, String>>,
+}
+
+
+impl DatabaseSchemaHandler {
+
+
+    pub fn new() -> Result<Self> {
+        let path = get_base_path()?.join("schema.hive");
+        let col_data : Vec<(Type, String)> = vec![(Type::Text, "database_id"), (Type::Text, "database_key")].into_iter().map(|(t, n)| (t, n.to_string())).collect();
+        let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
+        let mut databases : HashMap<String, String> = HashMap::new();
+        if let Some((mut value, mut cursor)) = table_handler.select_row(None, None)? {
+            loop {
+                let database_id : String = table_handler.get_col_from_row(value.clone(), "database_id")?.try_into()?;
+                let database_key : String = table_handler.get_col_from_row(value.clone(), "database_key")?.try_into()?;
+                databases.insert(database_id, database_key);
+                if let Some(new_value) = table_handler.next(&mut cursor)? {
+                    value = new_value;
+                    continue; 
+                }
+                break;
+            }
+        }
+        return Ok(DatabaseSchemaHandler {table_handler, databases : Mutex::new(databases)});
+    }
+
+
+    pub fn add_database(&self, database : String, key : String) -> Result<()> {
+        if let Ok(databases) = self.databases.lock() {
+            if databases.contains_key(&database) {
+                return Err(Error::new(ErrorKind::AlreadyExists, "database does exist already"));
+            }
+        }
+        let row : Row = Row{cols: vec![Value::new_text(database.clone()), Value::new_text(key.clone())]};
+        self.table_handler.insert_row(row)?;
+        if let Ok(mut databases) = self.databases.lock() {
+            databases.insert(database, key);
+        }
+        return Ok(());
+    }
+
+    pub fn get_database_names(&self) -> Result<Vec<String>> {
+        if let Ok(databases) = self.databases.lock() {
+            return Ok(databases.clone().into_keys().collect()); 
+        }
+        return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+    }
+
+    pub fn get_database_key(&self, database_name : String) -> Result<Option<String>> {
+        let databases = self.databases.lock().map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
+        return Ok(databases.get(&database_name).cloned());
+    }
+
+    pub fn check_key(&self, database : String, key : String) -> Result<bool> {
+        if let Ok(databases) = self.databases.lock() {
+            return match databases.get(&database) {
+                Some(val) if *val == key => Ok(true),
+                _ => Err(Error::new(ErrorKind::InvalidInput, "wrong key")),
+            }
+        }
+        return Err(Error::new(ErrorKind::Other, "thread poisoned"));
+    }
+
+    pub fn check_admin_key(&self, key : String) -> bool {
+        return key == "adminkey".to_string();
+    }
+
+}

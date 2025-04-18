@@ -372,7 +372,7 @@ pub mod execution {
 
 
     use super::parsing::*;
-    use crate::{schema::SchemaHandler, storage::{table_management::{Cursor, Operator, Predicate, Row, Type, TableHandler, simple::SimpleTableHandler}, file_management::delete_file}};
+    use crate::{schema::TableSchemaHandler, storage::{table_management::{Cursor, Operator, Predicate, Row, Type, TableHandler, simple::SimpleTableHandler}, file_management::delete_file}};
     use std::{io::{Result, Error, ErrorKind}, path::PathBuf, collections::hash_map::HashMap, sync::{RwLock, Mutex}};
     use rand::RngCore;
     use hex::encode;
@@ -381,7 +381,7 @@ pub mod execution {
 
     pub struct Executor {
         db_path : PathBuf,
-        schema : SchemaHandler,
+        schema : TableSchemaHandler,
         tables : RwLock<Vec<(String, Box<dyn TableHandler>)>>,
         cursors : Mutex<HashMap<Vec<u8>, (String, Cursor)>>,
     }
@@ -392,7 +392,7 @@ pub mod execution {
 
 
         pub fn new(db_path: PathBuf) -> Result<Self> {
-            let schema : SchemaHandler = SchemaHandler::new(&db_path)?;
+            let schema : TableSchemaHandler = TableSchemaHandler::new(&db_path)?;
             let mut tables : Vec<(String, Box<dyn TableHandler>)> = vec![];
             let table_data = schema.get_table_data()?;
             for table_id in table_data.keys() {

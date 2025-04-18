@@ -85,8 +85,21 @@ pub struct Connection {
 
 impl Connection {
 
-    pub fn new(address : String) -> Result<Self> {
-        let stream = TcpStream::connect(&address)?;
+    pub fn new(address : String, database : String, key : String) -> Result<Self> {
+        let mut stream = TcpStream::connect(&address)?;
+        let bytes = format!("{}.{}", database, key).into_bytes();
+        stream.write_all(&bytes)?;
+        stream.flush()?;
+        let mut buffer = [0u8; 512];
+        let len = stream.read(&mut buffer)?;
+        match buffer[..len] {
+            [0] => (),
+            [1] => {
+                drop(stream);
+                return Err(Error::new(ErrorKind::PermissionDenied, "wrong key"))
+            },
+            _ => {return Err(Error::new(ErrorKind::Other, "unexpected response"))},
+        }
         return Ok(Connection{stream});
     }
 
@@ -132,6 +145,10 @@ impl Connection {
         }
     }
 
+    pub fn close(self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+
 }
 
 #[cfg(test)]
@@ -142,22 +159,26 @@ mod tests {
 
     #[test]
     fn o() {
+        let mut connection = Connection::new("127.0.0.1:4321".to_string(),"standard".to_string(), "4321".to_string()).expect("couldnt connect");
         for i in 0..1000 {
-            query(format!("INSERT INTO numbers VALUES ({});", i).to_string()).unwrap();
+            connection.query(format!("INSERT INTO numbers VALUES ({});", i).to_string()).unwrap();
         }
+        connection.close();
     }
 
     #[test]
     fn t(){
-        if let Some(mut res) = query("SELECT * FROM test WHERE hallo == jippy;".to_string()).unwrap() {
+        let mut connection = Connection::new("127.0.0.1:4321".to_string(), "standard".to_string(), "4321".to_string()).expect("couldnt connect");
+        if let Some(mut res) = connection.query("SELECT * FROM numbers WHERE n < 10;".to_string()).unwrap() {
             println!("{:?}", res.row);
             loop {
-                if !next(&mut res).unwrap() {
+                if !connection.next(&mut res).unwrap() {
                     break;
                 }
                 println!("{:?}", res.row);
             }
         }
+        connection.close();
     }
 
 }
