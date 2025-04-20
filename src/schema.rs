@@ -185,6 +185,8 @@ mod test {
         assert_eq!(retrieved_data, col_data, "Retrieved column data should match inserted data");
     }
 
+
+
 #[test]
     fn test_get_col_data_empty() {
         let db_path = get_test_path().unwrap();
@@ -200,19 +202,26 @@ mod test {
 }
 
 
+
 pub struct DatabaseSchemaHandler {
     table_handler : Box<dyn TableHandler>, 
     databases : Mutex<HashMap<String, String>>,
 }
 
 
+
 impl DatabaseSchemaHandler {
 
 
+
     pub fn new() -> Result<Self> {
+
+        //Table containing database_id and database_key is created
         let path = get_base_path()?.join("schema.hive");
         let col_data : Vec<(Type, String)> = vec![(Type::Text, "database_id"), (Type::Text, "database_key")].into_iter().map(|(t, n)| (t, n.to_string())).collect();
         let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
+
+        //Map containing database name and key is initialized and filled
         let mut databases : HashMap<String, String> = HashMap::new();
         if let Some((mut value, mut cursor)) = table_handler.select_row(None, None)? {
             loop {
@@ -230,12 +239,17 @@ impl DatabaseSchemaHandler {
     }
 
 
+
     pub fn add_database(&self, database : String, key : String) -> Result<()> {
+
+        //Check if database with this name exists already
         if let Ok(databases) = self.databases.lock() {
             if databases.contains_key(&database) {
                 return Err(Error::new(ErrorKind::AlreadyExists, "database does exist already"));
             }
         }
+
+        //Database is added to map and table
         let row : Row = Row{cols: vec![Value::new_text(database.clone()), Value::new_text(key.clone())]};
         self.table_handler.insert_row(row)?;
         if let Ok(mut databases) = self.databases.lock() {
@@ -244,6 +258,8 @@ impl DatabaseSchemaHandler {
         return Ok(());
     }
 
+
+
     pub fn get_database_names(&self) -> Result<Vec<String>> {
         if let Ok(databases) = self.databases.lock() {
             return Ok(databases.clone().into_keys().collect()); 
@@ -251,10 +267,14 @@ impl DatabaseSchemaHandler {
         return Err(Error::new(ErrorKind::Other, "thread poisoned"));
     }
 
+
+
     pub fn get_database_key(&self, database_name : String) -> Result<Option<String>> {
         let databases = self.databases.lock().map_err(|_| Error::new(ErrorKind::Other, "Thread poisoned"))?;
         return Ok(databases.get(&database_name).cloned());
     }
+
+
 
     pub fn check_key(&self, database : String, key : String) -> Result<bool> {
         if let Ok(databases) = self.databases.lock() {
@@ -266,8 +286,11 @@ impl DatabaseSchemaHandler {
         return Err(Error::new(ErrorKind::Other, "thread poisoned"));
     }
 
+
+
     pub fn check_admin_key(&self, key : String) -> bool {
         return key == "adminkey".to_string();
     }
+
 
 }

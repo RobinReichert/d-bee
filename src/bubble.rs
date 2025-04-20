@@ -1,15 +1,20 @@
 
 #![allow(unused)]
 
+
 use std::fmt::{self, Display, Formatter};
+
 
 pub struct Bubble {
    content : String, 
    width : Vec<usize>,
 }
 
+
 impl Bubble {
 
+
+    //Returns a string that acts as the horizontal divider for a bubble
     pub fn get_divider(&self) -> String {
         let mut result = String::new();
         for j in 0..self.width.len() {
@@ -22,6 +27,8 @@ impl Bubble {
         return result;
     }
 
+
+    //Splits up the content into columns of fixed width
     pub fn format_line(&self, content : Vec<String>) -> String {
         let mut result : String = String::new();
         for i in 0..self.width.len() {
@@ -36,6 +43,9 @@ impl Bubble {
         result.push_str("|"); 
         return result;
     }
+
+
+
 
     pub fn new(width : Vec<usize>) -> Bubble {
         let mut bubble = Bubble{width, content: String::new()};

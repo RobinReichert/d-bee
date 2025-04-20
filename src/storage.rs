@@ -948,10 +948,17 @@ pub mod table_management {
 
     pub trait TableHandler: Sync + Send {
 
+        ///Takes a row object and a col name and then Returns the value on the corresponding place
+        ///in the row. If the col name is not part of the table an error is returned.
         fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
 
+        ///Creates a row from cols and their names. They can be in the wrong order as long as val x
+        ///in col_values has the same index as its corresponding name in col_names. Invalid names
+        ///result in an error.
         fn cols_to_row(&self, cols_names : Option<Vec<String>>, col_values : Vec<String>) -> Result<Row>;
 
+        ///Creates a Value of the type given by the table column that's name is passed to the
+        ///function.
         fn create_value(&self, col_name : String, value : String) -> Result<Value>;
 
         ///Takes a row object and inserts it into the table this handler is working on. This
@@ -1359,6 +1366,7 @@ pub mod table_management {
            }
 
 
+           ///Checks if col names passed to the function are present in the table
            fn validate_cols(&self, col_names : Vec<String>) -> Result<()> {
                let col_name_sett: HashSet<_> = col_names.iter().collect();
                let col_data_set: HashSet<_> = self.col_data.iter().map(|(_, n)| n).collect();
@@ -1369,6 +1377,7 @@ pub mod table_management {
            }
 
 
+           ///Keeps only columns of the row that are specified in the cols vec
            fn filter_row(&self, row : &mut Row, cols : Vec<String>) -> Result<()> {
                if self.col_data.len() != row.cols.len() {
                    return Err(Error::new(ErrorKind::InvalidInput, "row was already filtered"));
