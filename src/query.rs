@@ -20,46 +20,66 @@ pub mod parsing {
 
         #[derive(Clone, Debug)]
         pub enum Symbol {
+
+            ///A terminal represents a word and is always at the lowest level
             Terminal(String),
+
+            ///A wrapper wraps around another Symbol and adds a key value pair to the result map
+            ///when solved
             Wrapper(Box<Symbol>, String, String),
+
+            ///A value is like a wildcard and adds a key value pair to the result map
             Value(String),
+
+            ///An option will accept if any of the given symbols is found
             Option(Vec<Symbol>),
+
+            ///Repeat will accept if the symbol is present 0 to n times
             Repeat(Box<Symbol>),
+
+            ///A Sequence contains symbols and accepts if the symbols are present in the given
+            ///order
             Sequence(Vec<Symbol>),
         }
 
 
 
+        ///Terminal
         pub fn t(val: &str) -> Symbol {
             return Terminal(val.to_string());
         }
 
 
 
+        ///Wrapper
         pub fn w(s: Symbol, key: &str, val: &str) -> Symbol {
             return Wrapper(Box::new(s), key.to_string(), val.to_string());
         }
 
 
 
+        ///Value
         pub fn v(val: &str) -> Symbol {
             return Value(val.to_string());
         }
 
 
 
+        ///Option
         pub fn o(os: Vec<Symbol>) ->Symbol {
             return Option(os);
         }
 
 
 
+        ///Repeat
         pub fn r(val: Symbol) -> Symbol {
             return Repeat(Box::new(val));
         }
 
 
 
+        ///Sequence
         pub fn s(mut ss: Vec<Symbol>) ->Symbol {
             ss.reverse();
             return Sequence(ss);
@@ -72,15 +92,23 @@ pub mod parsing {
 
 
 
+        ///Recursively checks if the input matches the Symbol tree passed to stack and creates a
+        ///map containing values defined by the Symbol tree
         pub fn solve(mut stack: Vec<Symbol>,mut input: Vec<String>) -> std::result::Result<HashMap<String, Vec<String>>, (std::io::Error, usize)> {
+
+            //Abort
             if stack.len() == 0 {
                 if input.len() > 0 {
                     return Err((Error::new(ErrorKind::InvalidInput, "input was too long"), input.len()));
                 }
                 return Ok(HashMap::new()); 
             }
+
+            //Take the first Symbol of the Stack
             match stack.pop().ok_or_else(|| {(Error::new(ErrorKind::Other, "unexpected: stack was empty"), input.len())})? {
                 Terminal(exp) => {
+
+                    //Continue without the first word of the input
                     let val = String::from(input.pop().ok_or_else(|| {
                         (Error::new(ErrorKind::InvalidInput, "input was too short"), input.len())
                     })?);
@@ -90,6 +118,8 @@ pub mod parsing {
                     return Err((Error::new(ErrorKind::InvalidInput, format!("did not extpect {}, you may want to use {}", val, exp)), input.len()));
                 },
                 Wrapper(symbol, key, val) => {
+
+                    //Add contained symbol to the stack and adds key value pair to the result map
                     stack.push(*symbol);
                     let mut res = solve(stack, input)?;
                     if let Some(mut existing) = res.insert(key.clone(), vec![val.clone()]) {
@@ -100,6 +130,9 @@ pub mod parsing {
                     return Ok(res);
                 }
                 Value(id) => {
+
+                    //Removes first word of input and adds it to the result map with the key
+                    //defined by the Symbol
                     let val = input.pop().ok_or_else(||{
                         (Error::new(ErrorKind::InvalidInput, "input was too short"), input.len())
                     })?;
@@ -112,6 +145,8 @@ pub mod parsing {
                     return Ok(res);
                 },
                 Option(options) => {
+
+                    //Try each of the possible options and continue with the first that works
                     let mut result: std::result::Result<HashMap<String,Vec<String>>, (Error, usize)> = Err((Error::new(ErrorKind::InvalidInput, "option had no value"), input.len()));
                     let mut current_depth = usize::max_value();
                     for option in options {
@@ -131,13 +166,19 @@ pub mod parsing {
                     return result;
                 }
                 Repeat(symbol) => {
+
+                    //Try if input can be solved with current length
                     if let Ok(temp) = solve(stack.clone(), input.clone()) {
                         return Ok(temp);
                     } 
+
+                    //If it failed continue with one more iteration
                     stack.push(Sequence(vec![Repeat(symbol.clone()), *symbol]));
                     solve(stack, input)
                 }
                 Sequence(mut symbols) => {
+
+                    //Add all contained symbols to stack and continue
                     stack.append(&mut symbols);
                     solve(stack, input)
                 }
@@ -189,6 +230,8 @@ pub mod parsing {
 
 
         pub fn from(q: String) -> std::io::Result<Query> {
+
+            //Definition of all possible SQL commands
             let data_type : Symbol = o(vec![w(t("text"), COLUMN_TYPE_KEY, TEXT), w(t("number"), COLUMN_TYPE_KEY, NUMBER)]);
 
             let col_data : Symbol = o(vec![
@@ -227,9 +270,12 @@ pub mod parsing {
 
             let query : Symbol = s(vec![o(vec![create_table, drop_table, insert, select, delete]), t(";")]);
 
+            //Split query string to create input for bnf solver
             let regex = Regex::new(r"\w+|[();,*]|>=|>|==|!=|<|<=").unwrap();
             let mut input : Vec<String> = regex.find_iter(&q.to_lowercase()).map(|x| {x.as_str()}).map(|x| {x.to_string()}).collect();
             input.reverse();
+
+            //Solve
             let plan = bnf::solve(vec![query], input).map_err(|e|{Error::new(ErrorKind::InvalidInput, e.0.to_string())});
             return Ok(Query {plan: plan?});
         }
@@ -383,6 +429,8 @@ pub mod execution {
         db_path : PathBuf,
         schema : TableSchemaHandler,
         tables : RwLock<Vec<(String, Box<dyn TableHandler>)>>,
+
+        //Map that maps a hash to a cursor so requests can access a cursor via the hash
         cursors : Mutex<HashMap<Vec<u8>, (String, Cursor)>>,
     }
 
@@ -393,6 +441,8 @@ pub mod execution {
 
         pub fn new(db_path: PathBuf) -> Result<Self> {
             let schema : TableSchemaHandler = TableSchemaHandler::new(&db_path)?;
+
+            //Fill tables with Table Handlers constructed with data from the schema
             let mut tables : Vec<(String, Box<dyn TableHandler>)> = vec![];
             let table_data = schema.get_table_data()?;
             for table_id in table_data.keys() {
@@ -403,8 +453,13 @@ pub mod execution {
         }
 
 
+        ///Used to create a new table in the database
         fn create(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+
+            //Extract table name from the args map
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
+
+            //Check if table does exist
             if let Ok(tables) = self.tables.write() {
                 if tables.iter().any(|(t, _)| *t == table_name) {
                     return Err(Error::new(ErrorKind::InvalidInput, "table exists already"));
@@ -412,16 +467,24 @@ pub mod execution {
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
+
+            //Extract information about the tables columns
             let col_types : Vec<String> = args.get(COLUMN_TYPE_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col types")})?.clone();
             let col_names : Vec<String> = args.get(COLUMN_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain col names")})?.clone();
             if col_types.len() != col_names.len() {
                 return Err(Error::new(ErrorKind::InvalidInput, "args col types and col names had different lengths"));
             }
+
+            //Combine column information
             let mut col_data : Vec<(Type, String)> = vec![];
             for i in 0..col_types.len() {
                 col_data.push((Type::try_from(col_types[i].clone())?, col_names[i].clone()));
             }
+
+            //Construct new TableHandler
             let new_table = Box::new(SimpleTableHandler::new(self.db_path.join(format!("{}.hive", table_name)), col_data.clone())?);
+
+            //Insert new TableHandler into tables vec
             if let Ok(mut tables) = self.tables.write() {
                 tables.push((table_name.clone(), new_table));
                 for col in col_data {
@@ -434,8 +497,13 @@ pub mod execution {
         }
 
 
+        ///Used to delete a whole table
         fn drop(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+
+            //Extract table name from args map
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "args did not contain a table name")})?.clone();
+
+            //Check if table exists
             if let Ok(tables) = self.tables.read() {
                 if !tables.iter().any(|(t, _)|*t == table_name) {
                     return Err(Error::new(ErrorKind::InvalidInput, "table does not exists"));
@@ -443,19 +511,28 @@ pub mod execution {
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
+
+            //Remove TableHandler from memory
             self.schema.remove_table_data(table_name.clone())?;
             if let Ok(mut tables) = self.tables.write() {
                 tables.retain(|(n, _)| *n != table_name.clone()); 
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
+
+            //Clean up used file
             delete_file(&self.db_path.join(format!("{}.hive", table_name)));             
             return Ok(());
         }
 
 
+        ///Inserts a row into a table
         fn insert(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+
+            //Extract table name from args map
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
+
+            //Extract row data from args map
             let col_names_option : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
             let col_values : Vec<String> = args.get(COLUMN_VALUE_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain col values"))?.clone();
             if let Some(ref col_names) = col_names_option {
@@ -463,6 +540,8 @@ pub mod execution {
                     return Err(Error::new(ErrorKind::InvalidInput, "amount of values and columns did not match"));
                 }
             }
+
+            //Choose the table handler and use it to insert the row into the table
             if let Ok(tables) = self.tables.read() {
                 let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
                 let row = handler.cols_to_row(col_names_option, col_values)?;
@@ -474,11 +553,20 @@ pub mod execution {
         }
 
 
+        ///Selects a row from a table
         fn select(&self, args : HashMap<String, Vec<String>>) -> Result<Option<(Vec<u8>, Row)>> {
+
+            //Extract table name
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
+
+            //Extract the columns that should be returned
             let col_names : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
             if let Ok(tables) = self.tables.read() {
+
+                //Check if table exists and get it if possible
                 let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+
+                //Construct predicate from args
                 let predicate : Option<Predicate> = match (
                     args.get(PREDICATE_COL),
                     args.get(OPERATOR_KEY),
@@ -495,13 +583,19 @@ pub mod execution {
                                 let value = handler.create_value(column.clone(), value.clone())?;
                                 Some(Predicate{column : column.clone(), operator, value})
                             },
+
+                            //If there is no predicate in args the query is executed without one
                             _ => None,
                         }
                     },
                     _ => None,
                 };
+
+                //Execute the query
                 Ok(match handler.select_row(predicate, col_names)? {
                     Some((r, c)) => {
+
+                        //Store the cursor in the cursors map along with a randomly generated hash
                         let mut hash = [0u8; 16];  
                         loop {
                             rand::thread_rng().fill_bytes(&mut hash);
@@ -515,6 +609,8 @@ pub mod execution {
                                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
                             }
                         }
+
+                        //Return the hash as a pointer to the cursor and the row
                         Some((hash.to_vec(), r))
                     },
                     None => None,
@@ -525,9 +621,13 @@ pub mod execution {
         }
 
 
+        ///Used to delete rows from a table that match a certain predicate
         fn delete(&self, args : HashMap<String, Vec<String>>) -> Result<()> {
+
+            //Extract table name from args
             let table_name : String = args.get(TABLE_NAME_KEY).ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.first().ok_or_else(||Error::new(ErrorKind::InvalidInput, "args did not contain a table name"))?.clone();
-            let col_names : Option<Vec<String>> = args.get(COLUMN_NAME_KEY).cloned();
+
+            //Create predicate from args
             if let Ok(tables) = self.tables.read() {
                 let handler = &tables.iter().find(|(t, _)| *t== table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
                 let predicate : Option<Predicate> = match (
@@ -551,17 +651,27 @@ pub mod execution {
                     },
                     _ => None,
                 };
+
+                //Delete rows
                 Ok(handler.delete_row(predicate)?)
             }else{
                 return Err(Error::new(ErrorKind::Other, "thread poisoned"));
             }
         }
 
+
+        ///Like select but with a starting point
         pub fn next(&self, hash : Vec<u8>) -> Result<Option<Row>> {
             match (self.tables.read(), self.cursors.lock()) {
                 (Ok(tables), Ok(mut cursors)) => {
+
+                    //Get the cursor corresponding to the hash
                     let (table_name, cursor) = cursors.get_mut(&hash).ok_or_else(|| Error::new(ErrorKind::InvalidInput, "hash is invalid"))?;
+
+                    //Try to access the table stored with the cursor
                     let handler = &tables.iter().find(|(t, _)| *t==*table_name).ok_or_else(||Error::new(ErrorKind::InvalidInput, "table does not exist"))?.1;
+
+                    //Get next
                     handler.next(cursor)},
                 _ => Err(Error::new(ErrorKind::Other, "thread poisoned")),
             }
@@ -569,7 +679,11 @@ pub mod execution {
 
 
         pub fn execute(&self, query: Query) -> Result<Option<(Vec<u8>, Row)>>{
+
+            //Extract the command token from the input
             let command = query.plan.get(COMMAND_KEY).ok_or_else(||{Error::new(ErrorKind::InvalidInput, "query was not valid")})?.first().ok_or_else(||{Error::new(ErrorKind::InvalidInput, "command was empty")})?;
+
+            //Execute an action according to that token
             Ok(match command.as_str() {
                 CREATE => {
                     self.create(query.plan.clone())?;

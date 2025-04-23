@@ -93,7 +93,7 @@ pub fn start_cli() {
                             },
 
                             //If the result is empty print success so the user is not confused
-                            Ok(None) => println!("success"),
+                            Ok(None) => print_green("success"),
                             Err(e) => println!("{}", e),
                         }
                     },
@@ -172,7 +172,7 @@ pub fn start_cli() {
                             }
                             match buffer.remove(0) {
                                 0 => {println!("{}", String::from_utf8_lossy(&buffer));},
-                                1 => {println!("successfull");},
+                                1 => {print_green("success");},
                                 _ => {println!("invalid status code returned from server");},
                             }
                         }
@@ -201,6 +201,7 @@ pub fn start_cli() {
                 //Should always be some
                 if let Some((_, database_connection)) = database {
                     disconnect = false;
+
                     database_connection.close();
                     database = None;
                 }
@@ -210,4 +211,9 @@ pub fn start_cli() {
     else {
         println!("failed to connect");
     }
+}
+
+
+fn print_green(s : &str) {
+    println!("\x1B[1;32m{}\x1b[0m", s);
 }
