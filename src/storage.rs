@@ -420,37 +420,38 @@ pub mod page_management {
         //|            | next page   | page search |
         //+------------+-------------+-------------+
         
+/*
+        +----+--------------------------------------------------+
+        |head|next free page at: 2                              | head of free list points to the first free page 
+        +----+--------------------------------------------------+
+        |0   |id: 0, used: 96, next 5                           | header page contains headers of other pages 
+        |0   |id: 1, used: 0, next none                         |
+        |0   |id: 3, used: 0, next none                         |
+        |0   |id: 4, used: 0, next none                         |
+        +----+--------------------------------------------------+
+        |1   |..................................................| header page of this page is 0
+        +----+--------------------------------------------------+
+        |2   |6                                                 | this page is not allocated anymore and page 6 is the next in free list
+        +----+--------------------------------------------------+
+        |3   |..................................................| header page of this page is 0
+        +----+--------------------------------------------------+
+        |4   |..................................................| header page of this page is 0
+        +----+--------------------------------------------------+
+        |5   |id: 5, used: 72, next none                        | next page of page 0 
+        |5   |id: 7, used: 0, next none                         |
+        |5   |id: 8, used: 0, next none                         |
+        +----+--------------------------------------------------+
+        |6   |9                                                 | this page is not allocated anymore and page 9 is the next free page 
+        +----+--------------------------------------------------+
+        |7   |..................................................| header page is 5
+        +----+--------------------------------------------------+
+        |8   |..................................................| header page is 5
+        +----+--------------------------------------------------+
+        |9   |                                                  | 
+        +----+--------------------------------------------------+
 
-        //+----+--------------------------------------------------+
-        //|head|next free page at: 2                              | head of free list points to the first free page 
-        //+----+--------------------------------------------------+
-        //|0   |id: 0, used: 96, next 5                           | header page contains headers of other pages 
-        //|0   |id: 1, used: 0, next none                         |
-        //|0   |id: 3, used: 0, next none                         |
-        //|0   |id: 4, used: 0, next none                         |
-        //+----+--------------------------------------------------+
-        //|1   |..................................................| header page of this page is 0
-        //+----+--------------------------------------------------+
-        //|2   |6                                                 | this page is not allocated anymore and page 6 is the next in free list
-        //+----+--------------------------------------------------+
-        //|3   |..................................................| header page of this page is 0
-        //+----+--------------------------------------------------+
-        //|4   |..................................................| header page of this page is 0
-        //+----+--------------------------------------------------+
-        //|5   |id: 5, used: 72, next none                        | next page of page 0 
-        //|5   |id: 7, used: 0, next none                         |
-        //|5   |id: 8, used: 0, next none                         |
-        //+----+--------------------------------------------------+
-        //|6   |9                                                 | this page is not allocated anymore and page 9 is the next free page 
-        //+----+--------------------------------------------------+
-        //|7   |..................................................| header page is 5
-        //+----+--------------------------------------------------+
-        //|8   |..................................................| header page is 5
-        //+----+--------------------------------------------------+
-        //|9   |                                                  | 
-        //+----+--------------------------------------------------+
-        
 
+*/
         impl TryFrom<Vec<u8>> for PageHeader {
 
 
@@ -559,19 +560,23 @@ pub mod page_management {
             }
 
 
-            ///Iterates over all headers starting from the header passed to the function, once until true is returned from f
+            ///Iterates over_all headers starting from the header passed to the function, once until true is returned from f
             fn iterate_headers_from<F>(&self, header : PageHeader, mut f : F) -> Result<()> where F : FnMut(PageHeader) -> Result<bool> {
                 let mut current_page_id : usize = header.header_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain header_page_id")})?;
                 let mut previous_page_id = header.previous_page_id.ok_or_else(|| {Error::new(ErrorKind::InvalidInput, "header did not contain previous")})?;
                 let mut  initial_header_offset : usize = header.header_offset.ok_or_else(||{Error::new(ErrorKind::InvalidInput, "header did not contain offset")})?;
+
                 //Loop till the current header does not have a next_page_id
                 loop {
+
                     //Load current header page and extract the own header in order to find the
                     //next_page_id and the number of headers stored in the page
                     let current_header_page_bytes = self.file_handler.read_at(SimplePageHandler::calculate_page_start(current_page_id), PAGE_SIZE)?;
                     let own_header = PageHeader::try_from(current_header_page_bytes[0..PageHeader::get_size()].to_vec())?;
+
                     //Loop through all headers in the header page
                     for current_header_offset in (initial_header_offset..own_header.used).step_by(PageHeader::get_size()) {
+
                         //For every header set the correct header values and execute f
                         if let Some(header_bytes) = current_header_page_bytes.get(current_header_offset..current_header_offset + PageHeader::get_size()) {
                             let mut current_header = PageHeader::try_from(header_bytes.to_vec())?;
@@ -591,6 +596,7 @@ pub mod page_management {
                     }else{
                         break;
                     }
+
                     //Reset initial_offset since the offset from the header passed to the function
                     //should only be used in the first header_page
                     initial_header_offset = PageHeader::get_size();
@@ -681,6 +687,7 @@ pub mod page_management {
             fn find_fitting_page(&self, size : usize) -> Result<Option<PageHeader>> {
                 let mut header : Option<PageHeader> = None;
                 let callback = |current_header:PageHeader| {
+
                     //Set header to current header and exit iteration if page fits data of size
                     if PAGE_SIZE - current_header.used >= size {
                         header = Some(current_header);
@@ -948,14 +955,14 @@ pub mod table_management {
 
     pub trait TableHandler: Sync + Send {
 
-        ///Takes a row object and a col name and then Returns the value on the corresponding place
-        ///in the row. If the col name is not part of the table an error is returned.
-        fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
-
         ///Creates a row from cols and their names. They can be in the wrong order as long as val x
         ///in col_values has the same index as its corresponding name in col_names. Invalid names
         ///result in an error.
         fn cols_to_row(&self, cols_names : Option<Vec<String>>, col_values : Vec<String>) -> Result<Row>;
+        
+        ///Takes a row object and a col name and then Returns the value on the corresponding place
+        ///in the row. If the col name is not part of the table an error is returned.
+        fn get_col_from_row(&self, row : Row, col_name : &str) -> Result<Value>;
 
         ///Creates a Value of the type given by the table column that's name is passed to the
         ///function.
@@ -1667,6 +1674,89 @@ pub mod table_management {
 
 
             #[test]
+            fn type_from_string_test() {
+                 assert_eq!(Type::try_from("text".to_string()).unwrap(), Type::Text);
+                 assert_eq!(Type::try_from("number".to_string()).unwrap(), Type::Number);
+                 Type::try_from("foo".to_string()).expect_err("foo should not be a type");
+
+            }
+
+
+            #[test]
+            fn simple_table_handler_creation_test() {
+                let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_creation.test");
+                file_management::delete_file(&table_path);
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string())];
+                let handler_result = simple::SimpleTableHandler::new(table_path, col_data);
+                assert!(handler_result.is_ok());
+            }
+
+
+            #[test]
+            fn cols_to_row_test() {
+                let table_path = file_management::get_test_path().unwrap().join("cols_to_row.test");
+                file_management::delete_file(&table_path);
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Text, "Surname".to_string()), (Type::Number, "Age".to_string())];
+                let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
+
+                //right order with col_names given
+                let col_names : Vec<String> = vec!["Name".to_string(), "Surname".to_string(), "Age".to_string()];
+                let col_values : Vec<String> = vec!["tschigerillo".to_string(), "bob".to_string(), "2".to_string()];
+                let result = handler.cols_to_row(Some(col_names), col_values.clone());
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap().cols, vec![Value::new_text("tschigerillo".to_string()), Value::new_text("bob".to_string()), Value::new_number(2)]);
+
+                //right order without col_names
+                let result = handler.cols_to_row(None, col_values.clone());
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap().cols, vec![Value::new_text("tschigerillo".to_string()), Value::new_text("bob".to_string()), Value::new_number(2)]);
+
+                //wrong col_names
+                let col_names : Vec<String> = vec!["Wrong".to_string(), "Age".to_string(), "Name".to_string()];
+                let result = handler.cols_to_row(Some(col_names), col_values.clone());
+                assert!(result.is_err());
+
+                //wrong order with col_names given
+                let col_names : Vec<String> = vec!["Surname".to_string(), "Age".to_string(), "Name".to_string()];
+                let col_values : Vec<String> = vec!["bob".to_string(), "2".to_string(), "tschigerillo".to_string()];
+                let result = handler.cols_to_row(Some(col_names), col_values.clone());
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap().cols, vec![Value::new_text("tschigerillo".to_string()), Value::new_text("bob".to_string()), Value::new_number(2)]);
+
+                //wrong order without col_names
+                let result = handler.cols_to_row(None, col_values);
+                assert!(result.is_err());
+            }
+
+
+            #[test]
+            fn get_col_from_row_test() {
+                let table_path = file_management::get_test_path().unwrap().join("get_col_from_row.test");
+                file_management::delete_file(&table_path);
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Text, "Surname".to_string()), (Type::Number, "Age".to_string())];
+                let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
+
+                //create row
+                let col_names : Vec<String> = vec!["Name".to_string(), "Surname".to_string(), "Age".to_string()];
+                let col_values : Vec<String> = vec!["tschigerillo".to_string(), "bob".to_string(), "2".to_string()];
+                let row = handler.cols_to_row(Some(col_names), col_values.clone()).unwrap();
+                
+                //exiting col name
+                let result = handler.get_col_from_row(row.clone(), "Name");
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap(), Value::new_text("tschigerillo".to_string()));
+
+                //non existent col name
+                let result = handler.get_col_from_row(row, "Wrong");
+                assert!(result.is_err());
+            }
+
+
+            #[test]
+            fn create_value_test() {
+            }
+
+            #[test]
             fn row_into_bytes_and_back_test_test() {
                 let row = Row {
                     cols: vec![
@@ -1684,14 +1774,6 @@ pub mod table_management {
 
 
 
-            #[test]
-            fn simple_table_handler_creation_test() {
-                let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_creation.test");
-                file_management::delete_file(&table_path);
-                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string())];
-                let handler_result = simple::SimpleTableHandler::new(table_path, col_data);
-                assert!(handler_result.is_ok());
-            }
 
 
 #[test]
