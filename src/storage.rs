@@ -1731,6 +1731,8 @@ pub mod table_management {
 
             #[test]
             fn get_col_from_row_test() {
+
+                //create table handler
                 let table_path = file_management::get_test_path().unwrap().join("get_col_from_row.test");
                 file_management::delete_file(&table_path);
                 let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Text, "Surname".to_string()), (Type::Number, "Age".to_string())];
@@ -1754,6 +1756,30 @@ pub mod table_management {
 
             #[test]
             fn create_value_test() {
+
+                //create table handler 
+                let table_path = file_management::get_test_path().unwrap().join("get_col_from_row.test");
+                file_management::delete_file(&table_path);
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Text, "Surname".to_string()), (Type::Number, "Age".to_string())];
+                let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
+
+                //Existing column with fitting type text
+                let result = handler.create_value("Surname".to_string(), "bob".to_string());                 
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap(), Value::new_text("bob".to_string()));
+                
+                //Existing column with fitting type number
+                let result = handler.create_value("Age".to_string(), "2".to_string());
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap(), Value::new_number(2));
+
+                //Existing column with wrong type
+                let result = handler.create_value("Age".to_string(), "bob".to_string());
+                assert!(result.is_err());
+
+                //Non existent column
+                let result = handler.create_value("Wrong".to_string(), "bob".to_string());
+                assert!(result.is_err());
             }
 
             #[test]
@@ -1776,45 +1802,51 @@ pub mod table_management {
 
 
 
-#[test]
-            fn test_simple_table_handler_insert_and_select() {
-                let table_path = file_management::get_test_path().unwrap().join("simple_table_handler_insert_and_select.test");
+            #[test]
+            fn insert_and_select_test() {
+
+                //Create table handler 
+                let table_path = file_management::get_test_path().unwrap().join("insert_and_select.test");
                 file_management::delete_file(&table_path);
-                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Number, "Age".to_string())];
+                let col_data : Vec<(Type, String)> = vec![(Type::Text, "Name".to_string()), (Type::Text, "Surname".to_string()), (Type::Number, "Age".to_string())];
                 let handler = simple::SimpleTableHandler::new(table_path, col_data).unwrap();
-                let row = Row {
-                    cols: vec![
-                        Value::new_text("Alice".to_string()),
-                        Value::new_number(30),
-                    ],
-                };
-                let other_row = Row{cols: vec![
-                    Value::new_text("Bob".to_string()),
-                    Value::new_number(10)]};
-                // Insert the row
+
+                //Create rows
+                let row = handler.cols_to_row(None, vec!["tschigerillo".to_string(), "bob".to_string(), "2".to_string()]).unwrap();
+                let other_row = handler.cols_to_row(None, vec!["".to_string(), "alice".to_string(), "3".to_string()]).unwrap();
+
+                //Insert the rows
                 let insert_result = handler.insert_row(row.clone());
-                handler.insert_row(other_row.clone());
                 assert!(insert_result.is_ok());
-                // Select the row
+                let insert_result = handler.insert_row(other_row.clone());
+                assert!(insert_result.is_ok());
+
+                //Select and check result
                 let predicate = Predicate {
                     column: "Age".to_string(),
                     operator: Operator::Equal,
-                    value: Value::new_number(30),
+                    value: Value::new_number(3),
                 };
+                let select_result = handler.select_row(Some(predicate), None);
+                assert!(select_result.is_ok());
+                let cursor_option = select_result.unwrap();
+                assert!(cursor_option.is_some());
+                let cursor = cursor_option.unwrap();
+                assert_eq!(cursor.0.cols, other_row.cols);
+
+                //Test with text predicate
                 let other_predicate = Predicate {
-                    column: "Age".to_string(),
+                    column: "Surname".to_string(),
                     operator: Operator::Equal,
-                    value: Value::new_number(10),
+                    value: Value::new_text("bob".to_string()),
                 };
-                handler.delete_row(Some(predicate.clone())).unwrap();
+
                 let select_result = handler.select_row(Some(other_predicate), None);
                 assert!(select_result.is_ok());
                 let cursor_option = select_result.unwrap();
                 assert!(cursor_option.is_some());
                 let cursor = cursor_option.unwrap();
-                assert_eq!(cursor.0.cols.len(), row.cols.len());
-                assert_eq!(cursor.0.cols[0].to_string(), other_row.cols[0].to_string());
-                assert_eq!(cursor.0.cols[1].to_string(), other_row.cols[1].to_string());
+                assert_eq!(cursor.0.cols, row.cols);
             }
 
             #[test]
