@@ -187,7 +187,7 @@ impl DatabaseSchemaHandler {
             }
         }
         let mut admin_key = String::new();
-        let env_path = get_base_path()?.join(".env");
+        let env_path = base_path()?.join(".env");
         if !env_path.exists() { 
             let mut rng = thread_rng();
             for i in (0..32) {
