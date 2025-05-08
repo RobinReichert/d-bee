@@ -2,7 +2,9 @@
 
 
 
-use std::{io::Result, path::PathBuf, io::{Error, ErrorKind}, collections::hash_map::HashMap, sync::Mutex};
+use std::{env, fs::File, io::Result, path::PathBuf, io::{Write, Error, ErrorKind}, collections::hash_map::HashMap, sync::Mutex};
+use rand::{Rng, thread_rng};
+use dotenv::dotenv;
 use crate::storage::{table_management::{Row, Type, Predicate, Operator, Value, TableHandler, simple::SimpleTableHandler}, file_management::*};
 
 
@@ -150,62 +152,11 @@ impl TableSchemaHandler {
 
 
 
-#[cfg(test)]
-mod test {
-
-
-    use super::*;
-    use crate::storage::file_management::{get_test_path, delete_file};
-
-
-#[test]
-    fn test_schema_handler_creation() {
-        let db_path = get_test_path().unwrap();
-        delete_file(&db_path.join("schema.hive"));
-        let schema_handler = TableSchemaHandler::new(&db_path);
-        assert!(schema_handler.is_ok(), "TableSchemaHandler should be created successfully");
-    }
-
-#[test]
-    fn test_add_and_get_col_data() {
-        let db_path = get_test_path().unwrap();
-        delete_file(&db_path.join("schema.hive"));
-        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
-        let table_name = "test_table".to_string();
-        let col_data = vec![(Type::Text, "name".to_string()), (Type::Number, "age".to_string())];
-
-        // Add column data
-        for col in col_data.clone() {
-            let result = schema_handler.add_col_data(table_name.clone(), col);
-        assert!(result.is_ok(), "Adding column data should succeed");
-        }
-
-        // Retrieve column data
-        let retrieved_data = schema_handler.get_col_data(table_name).unwrap();
-        assert_eq!(retrieved_data, col_data, "Retrieved column data should match inserted data");
-    }
-
-
-
-#[test]
-    fn test_get_col_data_empty() {
-        let db_path = get_test_path().unwrap();
-        delete_file(&db_path.join("schema.hive"));
-        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
-
-        let table_name = "non_existent_table".to_string();
-        let retrieved_data = schema_handler.get_col_data(table_name);
-        assert!(retrieved_data.is_ok(), "Fetching column data for non-existent table should not fail");
-        assert!(retrieved_data.unwrap().is_empty(), "Retrieved data should be empty");
-    }
-
-}
-
-
 
 pub struct DatabaseSchemaHandler {
     table_handler : Box<dyn TableHandler>, 
     databases : Mutex<HashMap<String, String>>,
+    admin_key : String,
 }
 
 
@@ -214,10 +165,10 @@ impl DatabaseSchemaHandler {
 
 
 
-    pub fn new() -> Result<Self> {
+    pub fn new(base_path: PathBuf) -> Result<Self> {
 
         //Table containing database_id and database_key is created
-        let path = get_base_path()?.join("schema.hive");
+        let path = base_path.join("schema.hive");
         let col_data : Vec<(Type, String)> = vec![(Type::Text, "database_id"), (Type::Text, "database_key")].into_iter().map(|(t, n)| (t, n.to_string())).collect();
         let table_handler : Box<dyn TableHandler> = Box::new(SimpleTableHandler::new(path, col_data)?);
 
@@ -235,7 +186,22 @@ impl DatabaseSchemaHandler {
                 break;
             }
         }
-        return Ok(DatabaseSchemaHandler {table_handler, databases : Mutex::new(databases)});
+        let mut admin_key = String::new();
+        let env_path = get_base_path()?.join(".env");
+        if !env_path.exists() { 
+            let mut rng = thread_rng();
+            for i in (0..32) {
+                admin_key.push(rng.gen_range(0x20..=0x7E).into()); 
+            }
+            let mut file = create_file(&env_path)?;
+
+            // Write some default content
+            writeln!(file, "ADMIN_KEY=\"{}\"", admin_key)?;
+        }else{
+            dotenv::from_path(env_path).map_err(|e| {Error::new(ErrorKind::NotFound, format!("couldnt load env: {}", e))})?;
+            admin_key = env::var("ADMIN_KEY").map_err(|e| {Error::new(ErrorKind::NotFound, format!("couldnt find admin key in env file: {}", e))})?;
+        }
+        return Ok(DatabaseSchemaHandler {table_handler, databases : Mutex::new(databases), admin_key});
     }
 
 
@@ -255,6 +221,19 @@ impl DatabaseSchemaHandler {
         if let Ok(mut databases) = self.databases.lock() {
             databases.insert(database, key);
         }
+        return Ok(());
+    }
+
+
+
+    pub fn remove_database(&self, database : String) -> Result<()> {
+        if let Ok(mut databases) = self.databases.lock() {
+            if databases.remove(&database).is_none() {
+                return Err(Error::new(ErrorKind::NotFound, "database does not exist"));
+            }
+        }
+        let predicate = Predicate { column: "database_id".to_string(), operator: Operator::Equal, value: Value::new_text(database.clone())};
+        self.table_handler.delete_row(Some(predicate))?;
         return Ok(());
     }
 
@@ -289,8 +268,126 @@ impl DatabaseSchemaHandler {
 
 
     pub fn check_admin_key(&self, key : String) -> bool {
-        return key == "adminkey".to_string();
+        return key == self.admin_key; 
+    }
+
+}
+
+#[cfg(test)]
+mod test {
+
+
+    use super::*;
+    use crate::storage::file_management::{get_test_path, delete_file};
+
+
+#[test]
+    fn table_schema_handler_creation_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = TableSchemaHandler::new(&db_path);
+        assert!(schema_handler.is_ok(), "TableSchemaHandler should be created successfully");
+    }
+
+#[test]
+    fn table_schema_add_and_get_col_data_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
+        let table_name = "test_table".to_string();
+        let col_data = vec![(Type::Text, "name".to_string()), (Type::Number, "age".to_string())];
+
+        // Add column data
+        for col in col_data.clone() {
+            let result = schema_handler.add_col_data(table_name.clone(), col);
+        assert!(result.is_ok(), "Adding column data should succeed");
+        }
+
+        // Retrieve column data
+        let retrieved_data = schema_handler.get_col_data(table_name).unwrap();
+        assert_eq!(retrieved_data, col_data, "Retrieved column data should match inserted data");
     }
 
 
+
+#[test]
+    fn table_schema_get_col_data_empty_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = TableSchemaHandler::new(&db_path).unwrap();
+        let table_name = "non_existent_table".to_string();
+        let retrieved_data = schema_handler.get_col_data(table_name);
+        assert!(retrieved_data.is_ok(), "Fetching column data for non-existent table should not fail");
+        assert!(retrieved_data.unwrap().is_empty(), "Retrieved data should be empty");
+    }
+
+
+#[test]
+    fn database_schema_handler_creation_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = DatabaseSchemaHandler::new(get_test_path().unwrap());
+        assert!(schema_handler.is_ok(), "TableSchemaHandler should be created successfully");
+    }
+
+#[test]
+    fn database_schema_add_and_retrieve_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = DatabaseSchemaHandler::new(get_test_path().unwrap()).unwrap();
+        let name : String = "bob".to_string();
+        let key : String = "key".to_string();
+        schema_handler.add_database(name.clone(), key);
+        let result = schema_handler.get_database_names();
+        assert!(result.is_ok());
+        let mut database_names = result.unwrap();
+        let result_name = database_names.pop(); 
+        assert!(result_name.is_some());
+        assert_eq!(name, result_name.unwrap());
+    }
+
+
+    #[test]
+    fn database_schma_add_remove_and_retrieve_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = DatabaseSchemaHandler::new(get_test_path().unwrap()).unwrap();
+        let name : String = "bob".to_string();
+        let key : String = "key".to_string();
+        schema_handler.add_database(name.clone(), key);
+        schema_handler.remove_database(name.clone());
+        let result = schema_handler.get_database_names();
+        assert!(result.is_ok());
+        let mut database_names = result.unwrap();
+        assert_eq!(database_names.len(), 0);
+    }
+
+
+    #[test]
+    fn database_schema_get_key_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = DatabaseSchemaHandler::new(get_test_path().unwrap()).unwrap();
+        let name : String = "bob".to_string();
+        let key : String = "key".to_string();
+        schema_handler.add_database(name.clone(), key.clone());
+        let result = schema_handler.get_database_key(name);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(key));
+    }
+
+
+#[test]
+    fn database_schema_check_key_test() {
+        let db_path = get_test_path().unwrap();
+        delete_file(&db_path.join("schema.hive"));
+        let schema_handler = DatabaseSchemaHandler::new(get_test_path().unwrap()).unwrap();
+        let name : String = "bob".to_string();
+        let key : String = "key".to_string();
+        schema_handler.add_database(name.clone(), key.clone());
+        let result = schema_handler.check_key(name, key);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
 }
+

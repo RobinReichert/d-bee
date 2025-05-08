@@ -4,7 +4,8 @@
 use std::{io::{ErrorKind, Result, Read, Write}, thread, sync::{atomic::AtomicBool, Arc, RwLock, Mutex, Condvar}, collections::HashMap};
 use mio::{Poll, Token, Interest, Events, Waker};
 use mio::net::{TcpListener, TcpStream};
-use crate::{query::{execution::Executor, parsing::Query}, schema::DatabaseSchemaHandler, storage::{file_management::{get_base_path, create_dir}, table_management::{Row, Type}}};
+use rand::{Rng, thread_rng};
+use crate::{executor::Executor, query::{parsing::Query}, schema::DatabaseSchemaHandler, storage::{file_management::{get_base_path, create_dir, delete_dir}, table_management::{Row, Type}}};
 
 
 const QUERY_FLAG : u8 = 0x00;
@@ -12,6 +13,7 @@ const CURSOR_FLAG : u8 = 0x01;
 const NEW_DATABASE_FLAG : u8 = 0x02;
 const GET_KEY_FLAG : u8 = 0x03;
 const TERMINATE_FLAG : u8 = 0x04;
+const DELETE_DATABASE_FLAG : u8 = 0x05;
 
 
 #[derive(Clone)]
@@ -39,14 +41,14 @@ impl Server {
 
         //Set up database schema
         let path = get_base_path().expect("failed to get base path");
-        let database_schema = DatabaseSchemaHandler::new().expect("couldnt create database schema");
+        let database_schema = DatabaseSchemaHandler::new(get_base_path().expect("failed to get base path")).expect("couldnt create database schema");
         let database_names = database_schema.get_database_names().expect("couldnt retrieve database names");
 
         //Initialize and fill executors map
         let mut executors = HashMap::new();
         for name in database_names {
             let database_path = path.join(name.clone());
-            let executor = Executor::new(database_path).expect("failed to create Executor");
+            let executor = Executor::new(database_path).expect(&format!("failed to create Executor of {}", name));
             executors.insert(name, Arc::new(executor));
         }
         let work = Mutex::new(Vec::new());
@@ -286,13 +288,16 @@ impl Server {
                             },
                             (ConnectionType::Admin, NEW_DATABASE_FLAG) => {
                                 self.new_database(String::from_utf8_lossy(&req).to_string(), stream);
-                            }
+                            },
+                            (ConnectionType::Admin, DELETE_DATABASE_FLAG) => {
+                                self.delete_database(String::from_utf8_lossy(&req).to_string(), stream);
+                            },
                             (ConnectionType::Admin, GET_KEY_FLAG) => {
                                 self.get_key(String::from_utf8_lossy(&req).to_string(), stream);
-                            }
+                            },
                             (ConnectionType::Admin, TERMINATE_FLAG) => {
                                 terminate.wake().expect("failed to terminate");  
-                            }
+                            },
                             _ => println!("Invalid flag"),
                         }
                     }
@@ -406,7 +411,12 @@ impl Server {
             //The directory for the executor has to be created first
             create_dir(&path); 
             match Executor::new(path) {
-                Ok(executor) => {let key = "key".to_string();
+                Ok(executor) => {
+                    let mut key = String::new();
+                    let mut rng = thread_rng();
+                    for i in (0..32) {
+                        key.push(rng.gen_range(0x20..=0x7E).into()); 
+                    }
                     if !self.database_schema.add_database(args.clone(), key.clone()).is_ok() {
 
                         //Send error to client and abort
@@ -424,6 +434,27 @@ impl Server {
                     }
                     response.push(0);
                     response.extend(key.as_bytes());
+                },
+                Err(e) => {
+                    response.push(0);
+                    response.extend(b"failed to create executor for database: ");
+                    response.extend(e.to_string().as_bytes());
+                },
+            }
+            stream.as_ref().write_all(&response);
+            stream.as_ref().flush();
+        }
+    }
+
+
+    fn delete_database(&self, args: String, mut stream : Arc<TcpStream>) {
+        let mut response : Vec<u8> = vec![];
+        if let Ok(base_path) = get_base_path() {
+            match self.database_schema.remove_database(args.clone()) {
+                Ok(()) => {
+                    let path = base_path.join(args.clone());
+                    delete_dir(&path);
+                    response.push(1);
                 },
                 Err(e) => {
                     response.push(0);

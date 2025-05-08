@@ -1,6 +1,7 @@
 mod storage;
 mod bubble;
 mod query;
+mod executor;
 mod schema;
 mod server;
 mod cli;
